@@ -26,6 +26,13 @@ class GabaritoExtractor {
             }
         } catch (error) {
             console.error('Erro ao detectar tipo de arquivo:', error);
+            
+            // Não tenta OCR se o arquivo for PDF (Tesseract não suporta PDF)
+            const isPDF = fileBuffer.toString('utf-8', 0, 5) === '%PDF-';
+            if (isPDF) {
+                throw new Error('Não foi possível processar o gabarito em PDF. O arquivo pode estar corrompido ou protegido. Tente converter para imagem (PNG/JPG) ou usar gabarito manual em JSON.');
+            }
+            
             // Tenta processar como imagem (fallback)
             return await this.extractFromImage(fileBuffer);
         }
@@ -39,7 +46,9 @@ class GabaritoExtractor {
     async extractTextFromPdf(pdfBuffer) {
         try {
             const pdfjs = await this.getPdfjs();
-            const loadingTask = pdfjs.getDocument({ data: pdfBuffer });
+            // Converter Buffer para Uint8Array (requerido pelo pdfjs)
+            const uint8Array = new Uint8Array(pdfBuffer);
+            const loadingTask = pdfjs.getDocument({ data: uint8Array });
             const pdf = await loadingTask.promise;
             
             let fullText = '';
