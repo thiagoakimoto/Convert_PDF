@@ -25,9 +25,9 @@ class GabaritoExtractor {
                 const isPDF = fileBuffer.toString('utf-8', 0, 5) === '%PDF-';
                 
                 if (isPDF) {
-                    console.log('📄 Gabarito PDF - extraindo texto com pdfExtractor...');
-                    const pdfData = await pdfExtractor.extractAll(filePath);
-                    return this.parseGabaritoText(pdfData.fullText);
+                    console.log('📄 Gabarito PDF - extraindo APENAS texto (sem imagens)...');
+                    const textData = await pdfExtractor.extractText(filePath);
+                    return this.parseGabaritoText(textData.fullText);
                 } else {
                     console.log('🖼️ Gabarito imagem - processando OCR...');
                     return await this.extractFromImage(fileBuffer);
@@ -43,15 +43,15 @@ class GabaritoExtractor {
                 const tempPath = `./uploads/temp-gabarito-${Date.now()}.pdf`;
                 fs.writeFileSync(tempPath, fileBuffer);
                 
-                console.log('📄 Gabarito PDF detectado - extraindo texto com pdfExtractor...');
-                const pdfData = await pdfExtractor.extractAll(tempPath);
+                console.log('📄 Gabarito PDF detectado - extraindo APENAS texto (sem imagens)...');
+                const textData = await pdfExtractor.extractText(tempPath);
                 
                 // Limpar arquivo temporário
                 if (fs.existsSync(tempPath)) {
                     fs.unlinkSync(tempPath);
                 }
                 
-                return this.parseGabaritoText(pdfData.fullText);
+                return this.parseGabaritoText(textData.fullText);
             } else {
                 console.log('🖼️ Gabarito detectado como imagem - processando OCR...');
                 return await this.extractFromImage(fileBuffer);
