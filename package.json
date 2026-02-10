@@ -23,7 +23,8 @@
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.0.379",
     "sharp": "^0.33.2",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "tesseract.js": "^5.0.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.3"

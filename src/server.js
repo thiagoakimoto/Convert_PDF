@@ -5,14 +5,15 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const pdfExtractor = require('./extractors/pdfExtractor');
+const gabaritoExtractor = require('./extractors/gabaritoExtractor');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Configuração do CORS
 app.use(cors());
-app.use(express.json({ limit: '100mb' }));
-app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+app.use(express.json({ limit: '500mb' })); // Aumentado para 500MB
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
 // Servir arquivos estáticos (interface de teste)
 app.use(express.static(path.join(__dirname, '../public')));
@@ -272,6 +273,211 @@ app.post('/extract/pages-as-images', upload.single('pdf'), async (req, res) => {
     }
 });
 
+// ========================================
+// ROTAS DE GABARITO
+// ========================================
+
+// Rota para processar gabarito via imagem (OCR)
+app.post('/gabarito/extrair', upload.single('gabarito'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                error: 'Nenhuma imagem de gabarito foi enviada'
+            });
+        }
+
+        console.log(`📋 Processando gabarito: ${req.file.originalname}`);
+        
+        const filePath = req.file.path;
+        const fileBuffer = fs.readFileSync(filePath);
+        
+        // Extrair gabarito (suporta PDF e imagens)
+        const gabarito = await gabaritoExtractor.extractFromFile(fileBuffer);
+        
+        // Limpar arquivo temporário
+        fs.unlinkSync(filePath);
+        
+        console.log(`✅ Gabarito extraído: ${gabarito.totalQuestoes} questões`);
+        
+        res.json({
+            success: true,
+            filename: req.file.originalname,
+            gabarito: gabarito
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao processar gabarito:', error);
+        
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Erro ao processar gabarito'
+        });
+    }
+});
+
+// Rota para processar gabarito manual (JSON)
+app.post('/gabarito/manual', async (req, res) => {
+    try {
+        const { gabarito } = req.body;
+        
+        if (!gabarito) {
+            return res.status(400).json({
+                success: false,
+                error: 'Campo "gabarito" é obrigatório'
+            });
+        }
+
+        console.log(`📋 Processando gabarito manual`);
+        
+        const gabaritoProcessado = gabaritoExtractor.processManual(gabarito);
+        
+        console.log(`✅ Gabarito processado: ${gabaritoProcessado.totalQuestoes} questões`);
+        
+        res.json({
+            success: true,
+            gabarito: gabaritoProcessado
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao processar gabarito manual:', error);
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Erro ao processar gabarito'
+        });
+    }
+});
+
+// ========================================
+// ROTA PRINCIPAL: PROCESSAR PROVA COMPLETA
+// ========================================
+
+// Processa prova (PDF) + gabarito (imagem ou JSON) e faz match automático
+app.post('/processar-prova-completa', upload.any(), async (req, res) => {
+    try {
+        // Buscar arquivo da prova com nomes alternativos
+        const provaFile = req.files?.find(f => 
+            ['prova', 'pdf', 'file', 'document'].includes(f.fieldname.toLowerCase())
+        );
+        
+        // Buscar arquivo do gabarito com nomes alternativos
+        const gabaritoFile = req.files?.find(f => 
+            ['gabarito', 'answer', 'respostas', 'answers'].includes(f.fieldname.toLowerCase())
+        );
+        
+        // Validar arquivo da prova
+        if (!provaFile) {
+            // Mostrar quais campos foram recebidos para debug
+            const camposRecebidos = req.files?.map(f => f.fieldname).join(', ') || 'nenhum';
+            
+            return res.status(400).json({
+                success: false,
+                error: 'Arquivo da prova (PDF) é obrigatório',
+                dica: 'Use o campo "prova" no form-data',
+                camposAlternativos: ['prova', 'pdf', 'file', 'document'],
+                camposRecebidos: camposRecebidos
+            });
+        }
+
+        console.log(`🎯 Processando prova completa com match automático`);
+        console.log(`📄 Prova: ${provaFile.originalname} (campo: ${provaFile.fieldname})`);
+        if (gabaritoFile) {
+            console.log(`📋 Gabarito: ${gabaritoFile.originalname} (campo: ${gabaritoFile.fieldname})`);
+        }
+        
+        const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
+        
+        // 1. Extrair questões do PDF
+        console.log(`📄 Extraindo questões de: ${provaFile.originalname}`);
+        const provaData = await pdfExtractor.extractAll(provaFile.path);
+        
+        // Enriquecer questões com número detectado
+        const questoesComNumero = provaData.pages.map(page => ({
+            ...page,
+            numero: gabaritoExtractor.detectarNumeroQuestao(page.text, page.pageNumber)
+        }));
+        
+        // 2. Processar gabarito
+        let gabaritoData;
+        
+        if (gabaritoFile) {
+            console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
+            const gabaritoBuffer = fs.readFileSync(gabaritoFile.path);
+            // extractFromFile detecta automaticamente se é PDF ou imagem
+            gabaritoData = await gabaritoExtractor.extractFromFile(gabaritoBuffer);
+            fs.unlinkSync(gabaritoFile.path);
+        } else if (gabaritoManual) {
+            console.log(`📋 Processando gabarito manual`);
+            gabaritoData = gabaritoExtractor.processManual(gabaritoManual);
+        } else {
+            // Sem gabarito - retorna apenas as questões extraídas
+            fs.unlinkSync(provaFile.path);
+            
+            return res.json({
+                success: true,
+                prova: provaFile.originalname,
+                data: {
+                    ...provaData,
+                    pages: questoesComNumero
+                },
+                avisoGabarito: 'Nenhum gabarito foi fornecido. Retornando apenas questões extraídas.'
+            });
+        }
+        
+        // 3. Fazer match automático
+        console.log(`🔗 Fazendo match automático: questões ↔ gabarito`);
+        const resultado = gabaritoExtractor.matchQuestoesComGabarito(
+            questoesComNumero,
+            gabaritoData
+        );
+        
+        // Limpar arquivos temporários
+        fs.unlinkSync(provaFile.path);
+        
+        console.log(`✅ Processamento completo! ${resultado.stats.percentualMatch}% de match`);
+        
+        res.json({
+            success: true,
+            prova: provaFile.originalname,
+            gabarito: gabaritoFile ? gabaritoFile.originalname : 'manual',
+            data: {
+                metadata: provaData.metadata,
+                questoes: resultado.questoes,
+                fullText: provaData.fullText,
+                allImages: provaData.allImages,
+                gabarito: resultado.gabarito,
+                stats: {
+                    ...provaData.summary,
+                    ...resultado.stats
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('❌ Erro ao processar prova completa:', error);
+        
+        // Limpar arquivos em caso de erro
+        if (req.files) {
+            if (req.files.prova && fs.existsSync(req.files.prova[0].path)) {
+                fs.unlinkSync(req.files.prova[0].path);
+            }
+            if (req.files.gabarito && fs.existsSync(req.files.gabarito[0].path)) {
+                fs.unlinkSync(req.files.gabarito[0].path);
+            }
+        }
+        
+        res.status(500).json({
+            success: false,
+            error: error.message || 'Erro ao processar prova completa'
+        });
+    }
+});
+
 // Middleware de tratamento de erros
 app.use((error, req, res, next) => {
     if (error instanceof multer.MulterError) {
@@ -298,15 +504,24 @@ app.listen(PORT, () => {
 🖥️  Interface de teste: http://localhost:${PORT}
     
 📋 Endpoints disponíveis:
-   GET  /health                  - Status da API
-   POST /extract                 - Extrair tudo (texto + imagens)
-   POST /extract/images          - Extrair apenas imagens
-   POST /extract/text            - Extrair apenas texto
-   POST /extract/base64          - Processar PDF via base64
-   POST /extract/pages-as-images - Converter páginas em imagens
+   
+   EXTRAÇÃO BÁSICA:
+   GET  /health                     - Status da API
+   POST /extract                    - Extrair tudo (texto + imagens)
+   POST /extract/images             - Extrair apenas imagens
+   POST /extract/text               - Extrair apenas texto
+   POST /extract/base64             - Processar PDF via base64
+   POST /extract/pages-as-images    - Converter páginas em imagens
+   
+   GABARITO:
+   POST /gabarito/extrair           - Extrair gabarito de imagem (OCR)
+   POST /gabarito/manual            - Processar gabarito manual (JSON)
+   
+   🎯 COMPLETO (RECOMENDADO):
+   POST /processar-prova-completa   - PDF + Gabarito → Match automático!
 
-📝 Para usar no n8n, envie o PDF como multipart/form-data
-   ou use o endpoint /extract/base64 com JSON
+📝 Para n8n: Use /processar-prova-completa com multipart/form-data
+   Campos: prova (PDF) + gabarito (imagem ou JSON)
     `);
 });
 
