@@ -1,5 +1,7 @@
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
+const pdfExtractor = require('./pdfExtractor');
+const fs = require('fs');
 
 /**
  * Extrator de gabaritos de provas de concurso
@@ -8,74 +10,56 @@ class GabaritoExtractor {
     
     /**
      * Detecta o tipo de arquivo (PDF ou Imagem) e processa adequadamente
-     * @param {Buffer} fileBuffer - Buffer do arquivo (PDF ou imagem)
+     * @param {Buffer|String} fileBufferOrPath - Buffer da imagem ou caminho do arquivo
+     * @param {Boolean} isFilePath - Se true, o primeiro parâmetro é um caminho de arquivo
      * @returns {Object} - Gabarito processado
      */
-    async extractFromFile(fileBuffer) {
+    async extractFromFile(fileBufferOrPath, isFilePath = false) {
         try {
-            // Detectar tipo de arquivo pelos magic bytes
+            // Se recebeu path de arquivo
+            if (isFilePath) {
+                const filePath = fileBufferOrPath;
+                
+                // Detectar se é PDF pelo conteúdo
+                const fileBuffer = fs.readFileSync(filePath);
+                const isPDF = fileBuffer.toString('utf-8', 0, 5) === '%PDF-';
+                
+                if (isPDF) {
+                    console.log('📄 Gabarito PDF - extraindo texto com pdfExtractor...');
+                    const pdfData = await pdfExtractor.extractAll(filePath);
+                    return this.parseGabaritoText(pdfData.fullText);
+                } else {
+                    console.log('🖼️ Gabarito imagem - processando OCR...');
+                    return await this.extractFromImage(fileBuffer);
+                }
+            }
+            
+            // Se recebeu buffer, detectar tipo
+            const fileBuffer = fileBufferOrPath;
             const isPDF = fileBuffer.toString('utf-8', 0, 5) === '%PDF-';
             
             if (isPDF) {
-                console.log('📄 Gabarito detectado como PDF - extraindo texto...');
-                const texto = await this.extractTextFromPdf(fileBuffer);
-                return this.parseGabaritoText(texto);
+                // Salvar temporariamente para usar pdfExtractor
+                const tempPath = `./uploads/temp-gabarito-${Date.now()}.pdf`;
+                fs.writeFileSync(tempPath, fileBuffer);
+                
+                console.log('📄 Gabarito PDF detectado - extraindo texto com pdfExtractor...');
+                const pdfData = await pdfExtractor.extractAll(tempPath);
+                
+                // Limpar arquivo temporário
+                if (fs.existsSync(tempPath)) {
+                    fs.unlinkSync(tempPath);
+                }
+                
+                return this.parseGabaritoText(pdfData.fullText);
             } else {
                 console.log('🖼️ Gabarito detectado como imagem - processando OCR...');
                 return await this.extractFromImage(fileBuffer);
             }
         } catch (error) {
-            console.error('Erro ao detectar tipo de arquivo:', error);
-            
-            // Não tenta OCR se o arquivo for PDF (Tesseract não suporta PDF)
-            const isPDF = fileBuffer.toString('utf-8', 0, 5) === '%PDF-';
-            if (isPDF) {
-                throw new Error('Não foi possível processar o gabarito em PDF. O arquivo pode estar corrompido ou protegido. Tente converter para imagem (PNG/JPG) ou usar gabarito manual em JSON.');
-            }
-            
-            // Tenta processar como imagem (fallback)
-            return await this.extractFromImage(fileBuffer);
+            console.error('Erro ao processar gabarito:', error);
+            throw new Error(`Falha ao processar gabarito: ${error.message}`);
         }
-    }
-    
-    /**
-     * Extrai texto de PDF usando pdfjs
-     * @param {Buffer} pdfBuffer - Buffer do PDF
-     * @returns {String} - Texto extraído
-     */
-    async extractTextFromPdf(pdfBuffer) {
-        try {
-            const pdfjs = await this.getPdfjs();
-            // Converter Buffer para Uint8Array (requerido pelo pdfjs)
-            const uint8Array = new Uint8Array(pdfBuffer);
-            const loadingTask = pdfjs.getDocument({ data: uint8Array });
-            const pdf = await loadingTask.promise;
-            
-            let fullText = '';
-            
-            // Extrair texto de todas as páginas (gabaritos podem ter múltiplas páginas)
-            for (let i = 1; i <= pdf.numPages; i++) {
-                const page = await pdf.getPage(i);
-                const textContent = await page.getTextContent();
-                const pageText = textContent.items.map(item => item.str).join(' ');
-                fullText += pageText + '\n';
-            }
-            
-            console.log(`✅ Texto extraído do PDF: ${fullText.length} caracteres`);
-            return fullText;
-            
-        } catch (error) {
-            console.error('Erro ao extrair texto do PDF:', error);
-            throw new Error('Não foi possível extrair texto do PDF. Verifique se o arquivo é um PDF válido.');
-        }
-    }
-    
-    /**
-     * Obtém instância do pdfjs com suport a ESM
-     */
-    async getPdfjs() {
-        const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
-        return pdfjs;
     }
     
     /**

@@ -290,10 +290,9 @@ app.post('/gabarito/extrair', upload.single('gabarito'), async (req, res) => {
         console.log(`📋 Processando gabarito: ${req.file.originalname}`);
         
         const filePath = req.file.path;
-        const fileBuffer = fs.readFileSync(filePath);
         
-        // Extrair gabarito (suporta PDF e imagens)
-        const gabarito = await gabaritoExtractor.extractFromFile(fileBuffer);
+        // Extrair gabarito (suporta PDF e imagens) - passa path diretamente
+        const gabarito = await gabaritoExtractor.extractFromFile(filePath, true);
         
         // Limpar arquivo temporário
         fs.unlinkSync(filePath);
@@ -407,9 +406,11 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
-            const gabaritoBuffer = fs.readFileSync(gabaritoFile.path);
-            // extractFromFile detecta automaticamente se é PDF ou imagem
-            gabaritoData = await gabaritoExtractor.extractFromFile(gabaritoBuffer);
+            
+            // Usar pdfExtractor para PDFs (mesma lógica das provas)
+            gabaritoData = await gabaritoExtractor.extractFromFile(gabaritoFile.path, true);
+            
+            // Limpar arquivo temporário
             fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
             console.log(`📋 Processando gabarito manual`);
