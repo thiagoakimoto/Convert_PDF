@@ -477,6 +477,34 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         // Remover página 1 (capa/instruções) do resultado
         result.pages = result.pages.filter(p => p.pageNumber > 1);
+        
+        // Detectar e remover folhas de respostas (numeração reinicia)
+        const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+        let maxQ = 0;
+        let cutoffPage = Infinity;
+        
+        for (const page of result.pages) {
+            questionPattern.lastIndex = 0;
+            let m;
+            while ((m = questionPattern.exec(page.text || '')) !== null) {
+                const num = parseInt(m[1]);
+                if (num > 0 && num <= 200) {
+                    if (num <= maxQ - 10 && maxQ > 20) {
+                        cutoffPage = page.pageNumber;
+                        break;
+                    }
+                    maxQ = Math.max(maxQ, num);
+                }
+            }
+            if (cutoffPage !== Infinity) break;
+        }
+        
+        if (cutoffPage !== Infinity) {
+            console.log(`📋 Folha de respostas detectada a partir da página ${cutoffPage} (removendo)`);
+            result.pages = result.pages.filter(p => p.pageNumber < cutoffPage);
+        }
+        
+        // Recalcular summary
         result.allImages = result.pages.flatMap(p => p.images || []);
         result.summary.totalPages = result.pages.length;
         result.summary.totalImages = result.allImages.length;
@@ -496,11 +524,31 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
-            // Extrair apenas texto da primeira página do gabarito, sem modificação
             const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
-            const primeiraPagina = gabaritoText.pages[0];
-            gabarito_data = primeiraPagina ? primeiraPagina.text : '';
+            const textoCompleto = gabaritoText.pages.map(p => p.text).join('\n');
+            
+            // Pegar apenas o TIPO 1 (primeiro bloco antes do próximo TIPO)
+            const tipoMatch = textoCompleto.match(/TIPO\s*1([\s\S]*?)(?=TIPO\s*\d|\(\*\)|$)/i);
+            const blocoTipo1 = tipoMatch ? tipoMatch[1] : textoCompleto;
+            
+            // Parse: linhas de números seguidas por linhas de letras
+            const linhas = blocoTipo1.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            
+            for (let i = 0; i < linhas.length - 1; i++) {
+                const numeros = linhas[i].match(/\d+/g);
+                const letras = linhas[i + 1].match(/[A-E*]/gi);
+                
+                if (numeros && letras && numeros.length >= 3 && numeros.length === letras.length) {
+                    for (let j = 0; j < numeros.length; j++) {
+                        const resp = letras[j].toUpperCase();
+                        gabarito_data[numeros[j]] = resp === '*' ? 'ANULADA' : resp;
+                    }
+                    i++; // pular a linha de letras já processada
+                }
+            }
+            
             gabaritoSource = gabaritoFile.originalname;
+            console.log(`✅ Gabarito TIPO 1 parseado: ${Object.keys(gabarito_data).length} respostas`);
             
             if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
