@@ -11,6 +11,118 @@ const questionParser = require('./extractors/questionParser');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+/**
+ * Reorganiza páginas em questões individuais, associando imagens à questão correta.
+ * Detecta limites de questões pelo padrão de número isolado em linha.
+ * Imagens são associadas à questão que as referencia ou à última questão antes delas.
+ */
+function splitPagesIntoQuestions(pages) {
+    const questoes = [];
+    
+    // Padrões para detectar início de questão (número isolado numa linha)
+    // Ex: "\n40\n", "\nQuestão 41\n", "\n1\n"
+    const questionPatterns = [
+        /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi,
+    ];
+    
+    for (const page of pages) {
+        const text = page.text;
+        const images = page.images || [];
+        
+        // Encontrar todos os inícios de questões na página
+        const boundaries = [];
+        for (const pattern of questionPatterns) {
+            pattern.lastIndex = 0;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const numero = parseInt(match[1]);
+                if (numero > 0 && numero <= 200) {
+                    boundaries.push({
+                        numero,
+                        index: match.index,
+                        contentStart: match.index + match[0].length
+                    });
+                }
+            }
+        }
+        
+        // Deduplicar e ordenar por posição no texto
+        boundaries.sort((a, b) => a.index - b.index);
+        const uniqueBoundaries = boundaries.filter((b, i, arr) => 
+            i === 0 || b.numero !== arr[i - 1].numero || b.index !== arr[i - 1].index
+        );
+        
+        if (uniqueBoundaries.length === 0) {
+            // Página sem questão detectada (ex: textos de apoio, instruções)
+            // Retorna a página inteira como bloco com suas imagens
+            questoes.push({
+                numero: null,
+                pagina: page.pageNumber,
+                texto: text,
+                imagens: images
+            });
+            continue;
+        }
+        
+        // Dividir texto em questões
+        for (let i = 0; i < uniqueBoundaries.length; i++) {
+            const current = uniqueBoundaries[i];
+            const next = uniqueBoundaries[i + 1];
+            
+            // Texto da questão: do início do conteúdo até o próximo limite (ou fim da página)
+            const textoQuestao = next 
+                ? text.substring(current.index, next.index).trim()
+                : text.substring(current.index).trim();
+            
+            // Verificar quais imagens pertencem a essa questão
+            // Lógica: se só tem 1 questão na página, todas as imagens são dela
+            // Se tem múltiplas questões, verifica se o texto referencia imagem
+            let imagensQuestao = [];
+            
+            if (uniqueBoundaries.length === 1) {
+                // Única questão na página → todas as imagens são dela
+                imagensQuestao = images;
+            } else {
+                // Múltiplas questões → associar por palavras-chave no texto
+                const textoLower = textoQuestao.toLowerCase();
+                const referenciaImagem = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra[çc]/i.test(textoLower);
+                
+                if (referenciaImagem && images.length > 0) {
+                    // Essa questão referencia imagem → pegar as imagens da página
+                    // Se é a última questão que referencia, pega as que sobraram
+                    // Se é a primeira, pega as primeiras
+                    const questoesComImgRef = uniqueBoundaries.filter((b, idx) => {
+                        const bText = idx + 1 < uniqueBoundaries.length 
+                            ? text.substring(b.index, uniqueBoundaries[idx + 1].index)
+                            : text.substring(b.index);
+                        return /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra[çc]/i.test(bText.toLowerCase());
+                    });
+                    
+                    if (questoesComImgRef.length === 1) {
+                        // Só uma questão referencia imagem → todas as imagens são dela
+                        imagensQuestao = images;
+                    } else {
+                        // Múltiplas questões referenciam imagem → distribuir proporcionalmente
+                        const myIdx = questoesComImgRef.findIndex(b => b.numero === current.numero);
+                        const imgPerQuestion = Math.ceil(images.length / questoesComImgRef.length);
+                        const start = myIdx * imgPerQuestion;
+                        imagensQuestao = images.slice(start, start + imgPerQuestion);
+                    }
+                }
+            }
+            
+            questoes.push({
+                numero: current.numero,
+                pagina: page.pageNumber,
+                texto: textoQuestao,
+                imagens: imagensQuestao
+            });
+        }
+    }
+    
+    return questoes;
+}
+
 // Configuração do CORS
 app.use(cors());
 app.use(express.json({ limit: '500mb' })); // Aumentado para 500MB
@@ -415,7 +527,11 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
         
-        // 2. Processar gabarito
+        // 2. Reorganizar por questão (com imagens associadas à questão correta)
+        const questoes = splitPagesIntoQuestions(result.pages);
+        console.log(`📝 Questões detectadas: ${questoes.filter(q => q.numero !== null).length}`);
+        
+        // 3. Processar gabarito
         let gabarito_data = {};
         let gabaritoSource = 'nenhum';
         
@@ -443,11 +559,12 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         console.log(`   Imagens: ${result.summary.totalImages}`);
         console.log(`   Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
         
-        // 3. Resposta - data IDÊNTICO ao /extract (interface web) + gabarito separado
+        // 4. Resposta - data do extractAll + questões com imagens associadas + gabarito
         res.json({
             success: true,
             filename: provaFile.originalname,
             data: result,
+            questoes,
             gabarito_data
         });
 
