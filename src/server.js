@@ -12,56 +12,18 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /**
- * Reorganiza páginas em questões individuais com imagens associadas.
- * Simples: detecta números de questão, corta texto, distribui imagens por ordem.
+ * Adiciona campo "questao" em cada imagem indicando a qual questão pertence.
+ * Simples: detecta questões na página, distribui imagens por ordem.
  */
-function splitPagesIntoQuestions(pages) {
-    // 1. Primeiro passo: coletar TODAS as questões de todas as páginas
-    const rawBoundaries = [];
+function tagImagensComQuestao(pages) {
+    const IMG_KEYWORDS = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|seguir|foto|reprodu[çcz]|cena|obra|pintura/i;
     
     for (const page of pages) {
-        const text = page.text;
-        const pattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
-        let match;
-        
-        while ((match = pattern.exec(text)) !== null) {
-            const numero = parseInt(match[1]);
-            if (numero > 0 && numero <= 200) {
-                rawBoundaries.push({
-                    numero,
-                    pageNumber: page.pageNumber,
-                    index: match.index
-                });
-            }
-        }
-    }
-    
-    // 2. Detectar onde a numeração REINICIA (folhas de resposta/discursivas)
-    //    Ex: questões 1→65 e depois volta pro 1 = páginas depois do restart são lixo
-    let maxNumeroVisto = 0;
-    let cutoffPage = Infinity;
-    
-    for (const b of rawBoundaries) {
-        if (b.numero <= maxNumeroVisto - 10 && maxNumeroVisto > 20) {
-            // Numeração reiniciou — tudo a partir desta página é folha de resposta
-            cutoffPage = b.pageNumber;
-            console.log(`📋 Detectada folha de respostas a partir da página ${cutoffPage} (ignorando)`);
-            break;
-        }
-        maxNumeroVisto = Math.max(maxNumeroVisto, b.numero);
-    }
-    
-    // 3. Filtrar páginas úteis (antes do cutoff)
-    const pagesUteis = pages.filter(p => p.pageNumber < cutoffPage);
-    
-    // 4. Para cada página útil, dividir texto por questão e associar imagens
-    const questoes = [];
-    
-    for (const page of pagesUteis) {
-        const text = page.text;
+        const text = page.text || '';
         const images = page.images || [];
+        if (images.length === 0) continue;
         
-        // Encontrar limites de questões nesta página
+        // Detectar questões na página
         const pattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
         const bounds = [];
         let match;
@@ -69,7 +31,6 @@ function splitPagesIntoQuestions(pages) {
         while ((match = pattern.exec(text)) !== null) {
             const numero = parseInt(match[1]);
             if (numero > 0 && numero <= 200) {
-                // Evitar duplicatas
                 if (bounds.length === 0 || bounds[bounds.length - 1].numero !== numero) {
                     bounds.push({ numero, index: match.index });
                 }
@@ -77,62 +38,48 @@ function splitPagesIntoQuestions(pages) {
         }
         
         if (bounds.length === 0) {
-            // Página sem questão (texto de apoio, cabeçalho etc) — incluir com imagens
-            if (text.trim().length > 30) {
-                questoes.push({ numero: null, pagina: page.pageNumber, texto: text, imagens: images });
-            }
+            // Sem questão detectada — marcar imagens como página
+            images.forEach(img => { img.questao = null; });
             continue;
         }
         
-        // Cortar texto de cada questão
-        const questoesPagina = [];
-        for (let i = 0; i < bounds.length; i++) {
-            const start = bounds[i].index;
+        if (bounds.length === 1) {
+            // Única questão → todas as imagens são dela
+            images.forEach(img => { img.questao = bounds[0].numero; });
+            continue;
+        }
+        
+        // Múltiplas questões → pegar o texto de cada uma e ver quem referencia imagem
+        const questoesTexto = bounds.map((b, i) => {
+            const start = b.index;
             const end = i + 1 < bounds.length ? bounds[i + 1].index : text.length;
-            questoesPagina.push({
-                numero: bounds[i].numero,
-                texto: text.substring(start, end).trim()
-            });
-        }
+            return { numero: b.numero, texto: text.substring(start, end) };
+        });
         
-        // Associar imagens: distribuir na ordem para quem referencia
-        const imagensDisponiveis = [...images];
-        const imagensPorQuestao = new Map();
-        questoesPagina.forEach(q => imagensPorQuestao.set(q.numero, []));
+        // Distribuir imagens na ordem para quem referencia
+        const imgQueue = [...images];
+        const assigned = new Set();
         
-        const IMG_KEYWORDS = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|seguir|foto|reprodu[çcz]|cena|obra|pintura/i;
-        
-        if (questoesPagina.length === 1) {
-            // Única questão na página → todas as imagens são dela
-            imagensPorQuestao.set(questoesPagina[0].numero, imagensDisponiveis);
-        } else if (imagensDisponiveis.length > 0) {
-            // Múltiplas questões → distribuir imagens na ordem para quem referencia
-            for (const q of questoesPagina) {
-                if (imagensDisponiveis.length === 0) break;
-                if (IMG_KEYWORDS.test(q.texto)) {
-                    // Essa questão referencia imagem — pega a próxima disponível
-                    imagensPorQuestao.get(q.numero).push(imagensDisponiveis.shift());
-                }
-            }
-            // Imagens sobrando → jogar na última questão que referencia imagem, ou na última questão
-            if (imagensDisponiveis.length > 0) {
-                const lastQ = questoesPagina[questoesPagina.length - 1].numero;
-                imagensPorQuestao.get(lastQ).push(...imagensDisponiveis);
+        for (const q of questoesTexto) {
+            if (imgQueue.length === 0) break;
+            if (IMG_KEYWORDS.test(q.texto)) {
+                const img = imgQueue.shift();
+                img.questao = q.numero;
+                assigned.add(img);
             }
         }
         
-        // Montar resultado
-        for (const q of questoesPagina) {
-            questoes.push({
-                numero: q.numero,
-                pagina: page.pageNumber,
-                texto: q.texto,
-                imagens: imagensPorQuestao.get(q.numero) || []
-            });
+        // Imagens não atribuídas → dar pra última questão com referência, ou última questão
+        const lastQComRef = [...questoesTexto].reverse().find(q => IMG_KEYWORDS.test(q.texto));
+        const fallbackNumero = lastQComRef ? lastQComRef.numero : bounds[bounds.length - 1].numero;
+        
+        for (const img of imgQueue) {
+            img.questao = fallbackNumero;
         }
+        
+        // Marcar as que não foram tocadas
+        images.filter(img => img.questao === undefined).forEach(img => { img.questao = fallbackNumero; });
     }
-    
-    return questoes;
 }
 
 // Configuração do CORS
@@ -539,9 +486,9 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
         
-        // 2. Reorganizar por questão (com imagens associadas à questão correta)
-        const questoes = splitPagesIntoQuestions(result.pages);
-        console.log(`📝 Questões detectadas: ${questoes.filter(q => q.numero !== null).length}`);
+        // 2. Adicionar campo "questao" em cada imagem
+        tagImagensComQuestao(result.pages);
+        console.log(`🏷️ Imagens tagueadas com número da questão`);
         
         // 3. Processar gabarito
         let gabarito_data = {};
@@ -571,12 +518,11 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         console.log(`   Imagens: ${result.summary.totalImages}`);
         console.log(`   Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
         
-        // 4. Resposta - data do extractAll + questões com imagens associadas + gabarito
+        // 4. Resposta - data do extractAll (imagens com campo questao) + gabarito
         res.json({
             success: true,
             filename: provaFile.originalname,
             data: result,
-            questoes,
             gabarito_data
         });
 
