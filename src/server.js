@@ -405,26 +405,30 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         console.log(`📄 Extraindo conteúdo da prova...`);
         const result = await pdfExtractor.extractAll(provaFile.path);
         
-        // Filtrar página 1 (capa com logos) e resize de imagens
+        // Filtrar página 1 (capa com logos) e separar enunciado/alternativas
         const pagesFiltered = result.pages
             .filter(p => p.pageNumber > 1)
-            .map(page => ({
-                pageNumber: page.pageNumber,
-                text: page.text,
-                characterCount: page.characterCount,
-                images: page.images.map(img => ({
-                    id: img.id,
-                    page: img.page,
-                    width: img.width,
-                    height: img.height,
-                    format: img.format,
-                    mimeType: img.mimeType,
-                    base64: img.base64,
-                    dataUrl: img.dataUrl,
-                    sizeBytes: img.sizeBytes
-                })),
-                imageCount: page.imageCount
-            }));
+            .map(page => {
+                const { enunciado, alternativas } = questionParser.parseQuestionContent(page.text);
+                return {
+                    pageNumber: page.pageNumber,
+                    enunciado: questionParser.cleanText(enunciado),
+                    alternativas: alternativas ? questionParser.cleanAlternativas(alternativas) : null,
+                    characterCount: page.characterCount,
+                    images: page.images.map(img => ({
+                        id: img.id,
+                        page: img.page,
+                        width: img.width,
+                        height: img.height,
+                        format: img.format,
+                        mimeType: img.mimeType,
+                        base64: img.base64,
+                        dataUrl: img.dataUrl,
+                        sizeBytes: img.sizeBytes
+                    })),
+                    imageCount: page.imageCount
+                };
+            });
         
         console.log(`✅ Extração: ${pagesFiltered.length} páginas (skip pág 1), ${pagesFiltered.reduce((s, p) => s + p.imageCount, 0)} imagens`);
         
