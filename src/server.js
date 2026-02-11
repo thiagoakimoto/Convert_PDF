@@ -404,7 +404,16 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         console.log(`📄 Extraindo conteúdo da prova...`);
         const result = await pdfExtractor.extractAll(provaFile.path);
         
-        console.log(`✅ Extração: ${result.summary.totalPages} páginas, ${result.summary.totalImages} imagens`);
+        // Remover página 1 (capa/instruções) do resultado
+        result.pages = result.pages.filter(p => p.pageNumber > 1);
+        result.allImages = result.pages.flatMap(p => p.images || []);
+        result.summary.totalPages = result.pages.length;
+        result.summary.totalImages = result.allImages.length;
+        result.summary.totalCharacters = result.pages.reduce((s, p) => s + p.characterCount, 0);
+        result.summary.pagesWithImages = result.pages.filter(p => (p.images || []).length > 0).length;
+        result.fullText = result.pages.map(p => p.text).join('\n\n');
+        
+        console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
         
         // 2. Processar gabarito
         let gabarito_data = {};
@@ -412,8 +421,10 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
-            const gabaritoResult = await gabaritoExtractor.extractFromFile(gabaritoFile.path, true);
-            gabarito_data = gabaritoResult.respostas || {};
+            // Extrair apenas texto da primeira página do gabarito, sem modificação
+            const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
+            const primeiraPagina = gabaritoText.pages[0];
+            gabarito_data = primeiraPagina ? primeiraPagina.text : '';
             gabaritoSource = gabaritoFile.originalname;
             
             if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
