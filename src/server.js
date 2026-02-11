@@ -12,110 +12,122 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /**
- * Reorganiza páginas em questões individuais, associando imagens à questão correta.
- * Detecta limites de questões pelo padrão de número isolado em linha.
- * Imagens são associadas à questão que as referencia ou à última questão antes delas.
+ * Reorganiza páginas em questões individuais com imagens associadas.
+ * Simples: detecta números de questão, corta texto, distribui imagens por ordem.
  */
 function splitPagesIntoQuestions(pages) {
-    const questoes = [];
-    
-    // Padrões para detectar início de questão (número isolado numa linha)
-    // Ex: "\n40\n", "\nQuestão 41\n", "\n1\n"
-    const questionPatterns = [
-        /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi,
-    ];
+    // 1. Primeiro passo: coletar TODAS as questões de todas as páginas
+    const rawBoundaries = [];
     
     for (const page of pages) {
         const text = page.text;
+        const pattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+        let match;
+        
+        while ((match = pattern.exec(text)) !== null) {
+            const numero = parseInt(match[1]);
+            if (numero > 0 && numero <= 200) {
+                rawBoundaries.push({
+                    numero,
+                    pageNumber: page.pageNumber,
+                    index: match.index
+                });
+            }
+        }
+    }
+    
+    // 2. Detectar onde a numeração REINICIA (folhas de resposta/discursivas)
+    //    Ex: questões 1→65 e depois volta pro 1 = páginas depois do restart são lixo
+    let maxNumeroVisto = 0;
+    let cutoffPage = Infinity;
+    
+    for (const b of rawBoundaries) {
+        if (b.numero <= maxNumeroVisto - 10 && maxNumeroVisto > 20) {
+            // Numeração reiniciou — tudo a partir desta página é folha de resposta
+            cutoffPage = b.pageNumber;
+            console.log(`📋 Detectada folha de respostas a partir da página ${cutoffPage} (ignorando)`);
+            break;
+        }
+        maxNumeroVisto = Math.max(maxNumeroVisto, b.numero);
+    }
+    
+    // 3. Filtrar páginas úteis (antes do cutoff)
+    const pagesUteis = pages.filter(p => p.pageNumber < cutoffPage);
+    
+    // 4. Para cada página útil, dividir texto por questão e associar imagens
+    const questoes = [];
+    
+    for (const page of pagesUteis) {
+        const text = page.text;
         const images = page.images || [];
         
-        // Encontrar todos os inícios de questões na página
-        const boundaries = [];
-        for (const pattern of questionPatterns) {
-            pattern.lastIndex = 0;
-            let match;
-            while ((match = pattern.exec(text)) !== null) {
-                const numero = parseInt(match[1]);
-                if (numero > 0 && numero <= 200) {
-                    boundaries.push({
-                        numero,
-                        index: match.index,
-                        contentStart: match.index + match[0].length
-                    });
+        // Encontrar limites de questões nesta página
+        const pattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+        const bounds = [];
+        let match;
+        
+        while ((match = pattern.exec(text)) !== null) {
+            const numero = parseInt(match[1]);
+            if (numero > 0 && numero <= 200) {
+                // Evitar duplicatas
+                if (bounds.length === 0 || bounds[bounds.length - 1].numero !== numero) {
+                    bounds.push({ numero, index: match.index });
                 }
             }
         }
         
-        // Deduplicar e ordenar por posição no texto
-        boundaries.sort((a, b) => a.index - b.index);
-        const uniqueBoundaries = boundaries.filter((b, i, arr) => 
-            i === 0 || b.numero !== arr[i - 1].numero || b.index !== arr[i - 1].index
-        );
-        
-        if (uniqueBoundaries.length === 0) {
-            // Página sem questão detectada (ex: textos de apoio, instruções)
-            // Retorna a página inteira como bloco com suas imagens
-            questoes.push({
-                numero: null,
-                pagina: page.pageNumber,
-                texto: text,
-                imagens: images
-            });
+        if (bounds.length === 0) {
+            // Página sem questão (texto de apoio, cabeçalho etc) — incluir com imagens
+            if (text.trim().length > 30) {
+                questoes.push({ numero: null, pagina: page.pageNumber, texto: text, imagens: images });
+            }
             continue;
         }
         
-        // Dividir texto em questões
-        for (let i = 0; i < uniqueBoundaries.length; i++) {
-            const current = uniqueBoundaries[i];
-            const next = uniqueBoundaries[i + 1];
-            
-            // Texto da questão: do início do conteúdo até o próximo limite (ou fim da página)
-            const textoQuestao = next 
-                ? text.substring(current.index, next.index).trim()
-                : text.substring(current.index).trim();
-            
-            // Verificar quais imagens pertencem a essa questão
-            // Lógica: se só tem 1 questão na página, todas as imagens são dela
-            // Se tem múltiplas questões, verifica se o texto referencia imagem
-            let imagensQuestao = [];
-            
-            if (uniqueBoundaries.length === 1) {
-                // Única questão na página → todas as imagens são dela
-                imagensQuestao = images;
-            } else {
-                // Múltiplas questões → associar por palavras-chave no texto
-                const textoLower = textoQuestao.toLowerCase();
-                const referenciaImagem = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra[çc]/i.test(textoLower);
-                
-                if (referenciaImagem && images.length > 0) {
-                    // Essa questão referencia imagem → pegar as imagens da página
-                    // Se é a última questão que referencia, pega as que sobraram
-                    // Se é a primeira, pega as primeiras
-                    const questoesComImgRef = uniqueBoundaries.filter((b, idx) => {
-                        const bText = idx + 1 < uniqueBoundaries.length 
-                            ? text.substring(b.index, uniqueBoundaries[idx + 1].index)
-                            : text.substring(b.index);
-                        return /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra[çc]/i.test(bText.toLowerCase());
-                    });
-                    
-                    if (questoesComImgRef.length === 1) {
-                        // Só uma questão referencia imagem → todas as imagens são dela
-                        imagensQuestao = images;
-                    } else {
-                        // Múltiplas questões referenciam imagem → distribuir proporcionalmente
-                        const myIdx = questoesComImgRef.findIndex(b => b.numero === current.numero);
-                        const imgPerQuestion = Math.ceil(images.length / questoesComImgRef.length);
-                        const start = myIdx * imgPerQuestion;
-                        imagensQuestao = images.slice(start, start + imgPerQuestion);
-                    }
+        // Cortar texto de cada questão
+        const questoesPagina = [];
+        for (let i = 0; i < bounds.length; i++) {
+            const start = bounds[i].index;
+            const end = i + 1 < bounds.length ? bounds[i + 1].index : text.length;
+            questoesPagina.push({
+                numero: bounds[i].numero,
+                texto: text.substring(start, end).trim()
+            });
+        }
+        
+        // Associar imagens: distribuir na ordem para quem referencia
+        const imagensDisponiveis = [...images];
+        const imagensPorQuestao = new Map();
+        questoesPagina.forEach(q => imagensPorQuestao.set(q.numero, []));
+        
+        const IMG_KEYWORDS = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|seguir|foto|reprodu[çcz]|cena|obra|pintura/i;
+        
+        if (questoesPagina.length === 1) {
+            // Única questão na página → todas as imagens são dela
+            imagensPorQuestao.set(questoesPagina[0].numero, imagensDisponiveis);
+        } else if (imagensDisponiveis.length > 0) {
+            // Múltiplas questões → distribuir imagens na ordem para quem referencia
+            for (const q of questoesPagina) {
+                if (imagensDisponiveis.length === 0) break;
+                if (IMG_KEYWORDS.test(q.texto)) {
+                    // Essa questão referencia imagem — pega a próxima disponível
+                    imagensPorQuestao.get(q.numero).push(imagensDisponiveis.shift());
                 }
             }
-            
+            // Imagens sobrando → jogar na última questão que referencia imagem, ou na última questão
+            if (imagensDisponiveis.length > 0) {
+                const lastQ = questoesPagina[questoesPagina.length - 1].numero;
+                imagensPorQuestao.get(lastQ).push(...imagensDisponiveis);
+            }
+        }
+        
+        // Montar resultado
+        for (const q of questoesPagina) {
             questoes.push({
-                numero: current.numero,
+                numero: q.numero,
                 pagina: page.pageNumber,
-                texto: textoQuestao,
-                imagens: imagensQuestao
+                texto: q.texto,
+                imagens: imagensPorQuestao.get(q.numero) || []
             });
         }
     }
