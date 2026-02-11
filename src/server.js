@@ -527,15 +527,19 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
             const textoCompleto = gabaritoText.pages.map(p => p.text).join('\n');
             
-            // Pegar apenas o TIPO 1 (primeiro bloco antes do próximo TIPO)
-            const tipoMatch = textoCompleto.match(/TIPO\s*1([\s\S]*?)(?=TIPO\s*\d|\(\*\)|$)/i);
+            // Pegar apenas o TIPO 1 (tudo entre "TIPO 1" e "TIPO 2")
+            const tipoMatch = textoCompleto.match(/TIPO\s*1\s*\n([\s\S]*?)(?=Professor.*TIPO\s*2|$)/i);
             const blocoTipo1 = tipoMatch ? tipoMatch[1] : textoCompleto;
             
             // Parse: linhas de números seguidas por linhas de letras
             const linhas = blocoTipo1.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            console.log(`📋 Bloco TIPO 1: ${linhas.length} linhas`);
             
             for (let i = 0; i < linhas.length - 1; i++) {
+                // Linha de números: só dígitos e espaços
+                if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
                 const numeros = linhas[i].match(/\d+/g);
+                // Próxima linha: letras A-E e * separadas por espaço
                 const letras = linhas[i + 1].match(/[A-E*]/gi);
                 
                 if (numeros && letras && numeros.length >= 3 && numeros.length === letras.length) {
