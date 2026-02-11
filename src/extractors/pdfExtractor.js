@@ -61,6 +61,39 @@ class PDFExtractor {
     }
     
     /**
+     * Extrai conteúdo do PDF otimizado para provas de concurso
+     * Pula página 1 (capa/instruções), redimensiona imagens
+     * @param {string} filePath - Caminho do arquivo PDF
+     * @param {Object} options - {skipFirstPage: true, maxImageWidth: 800}
+     * @returns {Object} - {pages: [{pageNumber, text, images}], totalPages}
+     */
+    async extractForExam(filePath, options = {}) {
+        const { skipFirstPage = true, maxImageWidth = 800 } = options;
+        const pdfBuffer = fs.readFileSync(filePath);
+        const startPage = skipFirstPage ? 2 : 1;
+        
+        // Extrair texto e imagens em paralelo
+        const [textData, images] = await Promise.all([
+            this.extractTextFromBuffer(pdfBuffer),
+            this.extractImagesFromBuffer(pdfBuffer, { maxWidth: maxImageWidth, startPage })
+        ]);
+        
+        // Agrupar por página (já filtrado por startPage nas imagens)
+        const pages = textData.pages
+            .filter(p => p.pageNumber >= startPage)
+            .map(page => {
+                const pageImages = images.filter(img => img.page === page.pageNumber);
+                return {
+                    pageNumber: page.pageNumber,
+                    text: page.text,
+                    images: pageImages
+                };
+            });
+        
+        return { pages, totalPages: textData.totalPages };
+    }
+    
+    /**
      * Extrai apenas as imagens do PDF
      * @param {string} filePath - Caminho do arquivo PDF
      * @returns {Array} - Array de imagens em base64
@@ -137,9 +170,11 @@ class PDFExtractor {
     /**
      * Extrai imagens embutidas do PDF
      * @param {Buffer} pdfBuffer - Buffer do PDF
+     * @param {Object} options - {maxWidth: null, startPage: 1}
      * @returns {Array} - Array de objetos com imagens em base64
      */
-    async extractImagesFromBuffer(pdfBuffer) {
+    async extractImagesFromBuffer(pdfBuffer, options = {}) {
+        const { maxWidth = null, startPage = 1 } = options;
         const images = [];
         
         try {
@@ -153,6 +188,8 @@ class PDFExtractor {
             const numPages = pdfDoc.numPages;
             
             for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+                // Pular páginas antes de startPage
+                if (pageNum < startPage) continue;
                 const page = await pdfDoc.getPage(pageNum);
                 const operatorList = await page.getOperatorList();
                 
@@ -166,7 +203,7 @@ class PDFExtractor {
                             const imgName = operatorList.argsArray[i][0];
                             
                             // Tentar obter a imagem
-                            const imgData = await this.extractImageFromPage(page, imgName, pageNum, images.length + 1);
+                            const imgData = await this.extractImageFromPage(page, imgName, pageNum, images.length + 1, maxWidth);
                             if (imgData) {
                                 images.push(imgData);
                             }
@@ -184,7 +221,7 @@ class PDFExtractor {
             
             // Fallback: tentar extrair com pdf-lib
             try {
-                const fallbackImages = await this.extractImagesWithPdfLib(pdfBuffer);
+                const fallbackImages = await this.extractImagesWithPdfLib(pdfBuffer, { maxWidth, startPage });
                 images.push(...fallbackImages);
             } catch (fallbackError) {
                 console.error('Erro no fallback com pdf-lib:', fallbackError.message);
@@ -196,8 +233,9 @@ class PDFExtractor {
     
     /**
      * Extrai uma imagem específica de uma página
+     * @param {number} maxWidth - Largura máxima para redimensionamento (null = sem resize)
      */
-    async extractImageFromPage(page, imgName, pageNum, imgIndex) {
+    async extractImageFromPage(page, imgName, pageNum, imgIndex, maxWidth = null) {
         try {
             const objs = page.objs;
             
@@ -260,18 +298,22 @@ class PDFExtractor {
                 }
             }
             
-            // Converter para PNG
-            const pngBuffer = await sharp(Buffer.from(imageData), inputOptions)
-                .png()
-                .toBuffer();
+            // Converter para PNG (com resize opcional)
+            let pipeline = sharp(Buffer.from(imageData), inputOptions);
+            
+            if (maxWidth && width > maxWidth) {
+                pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
+            }
+            
+            const { data: pngBuffer, info } = await pipeline.png().toBuffer({ resolveWithObject: true });
             
             const base64 = pngBuffer.toString('base64');
             
             return {
                 id: `img_${pageNum}_${imgIndex}`,
                 page: pageNum,
-                width,
-                height,
+                width: info.width,
+                height: info.height,
                 format: 'png',
                 mimeType: 'image/png',
                 base64: base64,
@@ -288,7 +330,8 @@ class PDFExtractor {
     /**
      * Fallback: Extrai imagens usando pdf-lib
      */
-    async extractImagesWithPdfLib(pdfBuffer) {
+    async extractImagesWithPdfLib(pdfBuffer, options = {}) {
+        const { maxWidth = null, startPage = 1 } = options;
         const images = [];
         
         try {
@@ -298,6 +341,8 @@ class PDFExtractor {
             let imageIndex = 0;
             
             for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+                // Pular páginas antes de startPage
+                if (pageIndex + 1 < startPage) continue;
                 const page = pages[pageIndex];
                 const resources = page.node.get(page.node.context.obj('Resources'));
                 

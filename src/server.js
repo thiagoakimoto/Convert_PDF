@@ -6,6 +6,7 @@ const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const pdfExtractor = require('./extractors/pdfExtractor');
 const gabaritoExtractor = require('./extractors/gabaritoExtractor');
+const questionParser = require('./extractors/questionParser');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -38,10 +39,19 @@ const storage = multer.diskStorage({
 const upload = multer({
     storage: storage,
     fileFilter: (req, file, cb) => {
-        if (file.mimetype === 'application/pdf') {
+        const allowedMimes = [
+            'application/pdf',
+            'image/png',
+            'image/jpeg',
+            'image/jpg',
+            'image/gif',
+            'image/webp',
+            'image/tiff'
+        ];
+        if (allowedMimes.includes(file.mimetype)) {
             cb(null, true);
         } else {
-            cb(new Error('Apenas arquivos PDF são permitidos!'), false);
+            cb(new Error('Apenas arquivos PDF e imagens são permitidos!'), false);
         }
     },
     limits: {
@@ -356,7 +366,7 @@ app.post('/gabarito/manual', async (req, res) => {
 // ROTA PRINCIPAL: PROCESSAR PROVA COMPLETA
 // ========================================
 
-// Processa prova (PDF) + gabarito (imagem ou JSON) e faz match automático
+// Processa prova (PDF) + gabarito (PDF/imagem ou JSON) e retorna formato estruturado
 app.post('/processar-prova-completa', upload.any(), async (req, res) => {
     try {
         // Buscar arquivo da prova com nomes alternativos
@@ -371,7 +381,6 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         // Validar arquivo da prova
         if (!provaFile) {
-            // Mostrar quais campos foram recebidos para debug
             const camposRecebidos = req.files?.map(f => f.fieldname).join(', ') || 'nenhum';
             
             return res.status(400).json({
@@ -383,7 +392,7 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             });
         }
 
-        console.log(`🎯 Processando prova completa com match automático`);
+        console.log(`\n🎯 Processando prova completa`);
         console.log(`📄 Prova: ${provaFile.originalname} (campo: ${provaFile.fieldname})`);
         if (gabaritoFile) {
             console.log(`📋 Gabarito: ${gabaritoFile.originalname} (campo: ${gabaritoFile.fieldname})`);
@@ -391,71 +400,66 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
         
-        // 1. Extrair questões do PDF
-        console.log(`📄 Extraindo questões de: ${provaFile.originalname}`);
-        const provaData = await pdfExtractor.extractAll(provaFile.path);
+        // 1. Extrair conteúdo do PDF (skip página 1, resize 800px)
+        console.log(`📄 Extraindo conteúdo da prova (skip pág 1, resize 800px)...`);
+        const examData = await pdfExtractor.extractForExam(provaFile.path, {
+            skipFirstPage: true,
+            maxImageWidth: 800
+        });
         
-        // Enriquecer questões com número detectado
-        const questoesComNumero = provaData.pages.map(page => ({
-            ...page,
-            numero: gabaritoExtractor.detectarNumeroQuestao(page.text, page.pageNumber)
-        }));
+        // 2. Parsear questões com o parser inteligente
+        console.log(`🔍 Parseando questões...`);
+        const prova_data = questionParser.parseProva(examData.pages, {
+            skipFirstPage: false // Já filtrado no extractForExam
+        });
         
-        // 2. Processar gabarito
-        let gabaritoData;
+        console.log(`✅ ${prova_data.length} questões parseadas`);
+        
+        // 3. Processar gabarito
+        let gabarito_data = {};
+        let gabaritoSource = 'nenhum';
         
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
-            
-            // Usar pdfExtractor para PDFs (mesma lógica das provas)
-            gabaritoData = await gabaritoExtractor.extractFromFile(gabaritoFile.path, true);
+            const gabaritoResult = await gabaritoExtractor.extractFromFile(gabaritoFile.path, true);
+            gabarito_data = gabaritoResult.respostas || {};
+            gabaritoSource = gabaritoFile.originalname;
             
             // Limpar arquivo temporário
-            fs.unlinkSync(gabaritoFile.path);
+            if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
             console.log(`📋 Processando gabarito manual`);
-            gabaritoData = gabaritoExtractor.processManual(gabaritoManual);
-        } else {
-            // Sem gabarito - retorna apenas as questões extraídas
-            fs.unlinkSync(provaFile.path);
-            
-            return res.json({
-                success: true,
-                prova: provaFile.originalname,
-                data: {
-                    ...provaData,
-                    pages: questoesComNumero
-                },
-                avisoGabarito: 'Nenhum gabarito foi fornecido. Retornando apenas questões extraídas.'
-            });
+            const gabaritoResult = gabaritoExtractor.processManual(gabaritoManual);
+            gabarito_data = gabaritoResult.respostas || {};
+            gabaritoSource = 'manual';
         }
         
-        // 3. Fazer match automático
-        console.log(`🔗 Fazendo match automático: questões ↔ gabarito`);
-        const resultado = gabaritoExtractor.matchQuestoesComGabarito(
-            questoesComNumero,
-            gabaritoData
-        );
+        // Limpar arquivo da prova
+        if (fs.existsSync(provaFile.path)) fs.unlinkSync(provaFile.path);
         
-        // Limpar arquivos temporários
-        fs.unlinkSync(provaFile.path);
+        // 4. Montar stats
+        const questoesComImagem = prova_data.filter(q => q.imagem_base64 !== null).length;
+        const questoesComAlternativas = prova_data.filter(q => q.alternativas !== null).length;
         
-        console.log(`✅ Processamento completo! ${resultado.stats.percentualMatch}% de match`);
+        console.log(`✅ Processamento completo!`);
+        console.log(`   Questões: ${prova_data.length}`);
+        console.log(`   Com alternativas: ${questoesComAlternativas}`);
+        console.log(`   Com imagem: ${questoesComImagem}`);
+        console.log(`   Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
         
         res.json({
             success: true,
             prova: provaFile.originalname,
-            gabarito: gabaritoFile ? gabaritoFile.originalname : 'manual',
-            data: {
-                metadata: provaData.metadata,
-                questoes: resultado.questoes,
-                fullText: provaData.fullText,
-                allImages: provaData.allImages,
-                gabarito: resultado.gabarito,
-                stats: {
-                    ...provaData.summary,
-                    ...resultado.stats
-                }
+            gabarito: gabaritoSource,
+            prova_data,
+            gabarito_data,
+            stats: {
+                totalQuestoes: prova_data.length,
+                questoesComAlternativas,
+                questoesComImagem,
+                totalPaginas: examData.totalPages,
+                paginasProcessadas: examData.pages.length,
+                gabaritoRespostas: Object.keys(gabarito_data).length
             }
         });
 
@@ -464,11 +468,10 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         // Limpar arquivos em caso de erro
         if (req.files) {
-            if (req.files.prova && fs.existsSync(req.files.prova[0].path)) {
-                fs.unlinkSync(req.files.prova[0].path);
-            }
-            if (req.files.gabarito && fs.existsSync(req.files.gabarito[0].path)) {
-                fs.unlinkSync(req.files.gabarito[0].path);
+            for (const file of req.files) {
+                if (fs.existsSync(file.path)) {
+                    try { fs.unlinkSync(file.path); } catch(e) {}
+                }
             }
         }
         

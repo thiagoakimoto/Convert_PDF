@@ -139,8 +139,7 @@ class GabaritoExtractor {
         
         return {
             respostas: gabarito,
-            totalQuestoes: Object.keys(gabarito).length,
-            textoOriginal: text
+            totalQuestoes: Object.keys(gabarito).length
         };
     }
     
