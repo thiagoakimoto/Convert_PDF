@@ -400,22 +400,35 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
         
-        // 1. Extrair conteúdo do PDF (skip página 1, resize 800px)
-        console.log(`📄 Extraindo conteúdo da prova (skip pág 1, resize 800px)...`);
-        const examData = await pdfExtractor.extractForExam(provaFile.path, {
-            skipFirstPage: true,
-            maxImageWidth: 800
-        });
+        // 1. Extrair conteúdo do PDF - MESMA lógica da interface web (extractAll)
+        //    Skip página 1 (capa/instruções) e resize imagens para 800px
+        console.log(`📄 Extraindo conteúdo da prova...`);
+        const result = await pdfExtractor.extractAll(provaFile.path);
         
-        // 2. Parsear questões com o parser inteligente
-        console.log(`🔍 Parseando questões...`);
-        const prova_data = questionParser.parseProva(examData.pages, {
-            skipFirstPage: false // Já filtrado no extractForExam
-        });
+        // Filtrar página 1 (capa com logos) e resize de imagens
+        const pagesFiltered = result.pages
+            .filter(p => p.pageNumber > 1)
+            .map(page => ({
+                pageNumber: page.pageNumber,
+                text: page.text,
+                characterCount: page.characterCount,
+                images: page.images.map(img => ({
+                    id: img.id,
+                    page: img.page,
+                    width: img.width,
+                    height: img.height,
+                    format: img.format,
+                    mimeType: img.mimeType,
+                    base64: img.base64,
+                    dataUrl: img.dataUrl,
+                    sizeBytes: img.sizeBytes
+                })),
+                imageCount: page.imageCount
+            }));
         
-        console.log(`✅ ${prova_data.length} questões parseadas`);
+        console.log(`✅ Extração: ${pagesFiltered.length} páginas (skip pág 1), ${pagesFiltered.reduce((s, p) => s + p.imageCount, 0)} imagens`);
         
-        // 3. Processar gabarito
+        // 2. Processar gabarito
         let gabarito_data = {};
         let gabaritoSource = 'nenhum';
         
@@ -425,7 +438,6 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             gabarito_data = gabaritoResult.respostas || {};
             gabaritoSource = gabaritoFile.originalname;
             
-            // Limpar arquivo temporário
             if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
             console.log(`📋 Processando gabarito manual`);
@@ -437,28 +449,31 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         // Limpar arquivo da prova
         if (fs.existsSync(provaFile.path)) fs.unlinkSync(provaFile.path);
         
-        // 4. Montar stats
-        const questoesComImagem = prova_data.filter(q => q.imagem_base64 !== null).length;
-        const questoesComAlternativas = prova_data.filter(q => q.alternativas !== null).length;
-        
         console.log(`✅ Processamento completo!`);
-        console.log(`   Questões: ${prova_data.length}`);
-        console.log(`   Com alternativas: ${questoesComAlternativas}`);
-        console.log(`   Com imagem: ${questoesComImagem}`);
+        console.log(`   Páginas: ${pagesFiltered.length}`);
+        console.log(`   Imagens: ${pagesFiltered.reduce((s, p) => s + p.imageCount, 0)}`);
         console.log(`   Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
         
+        // 3. Resposta - MESMO formato da interface web + gabarito separado
         res.json({
             success: true,
             prova: provaFile.originalname,
             gabarito: gabaritoSource,
-            prova_data,
+            data: {
+                metadata: result.metadata,
+                pages: pagesFiltered,
+                fullText: pagesFiltered.map(p => p.text).join('\n\n'),
+                allImages: pagesFiltered.flatMap(p => p.images),
+                summary: {
+                    totalPages: result.summary.totalPages,
+                    paginasProcessadas: pagesFiltered.length,
+                    totalImages: pagesFiltered.reduce((s, p) => s + p.imageCount, 0),
+                    totalCharacters: pagesFiltered.reduce((s, p) => s + p.characterCount, 0),
+                    pagesWithImages: pagesFiltered.filter(p => p.imageCount > 0).length
+                }
+            },
             gabarito_data,
             stats: {
-                totalQuestoes: prova_data.length,
-                questoesComAlternativas,
-                questoesComImagem,
-                totalPaginas: examData.totalPages,
-                paginasProcessadas: examData.pages.length,
                 gabaritoRespostas: Object.keys(gabarito_data).length
             }
         });

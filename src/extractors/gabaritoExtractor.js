@@ -117,12 +117,13 @@ class GabaritoExtractor {
     parseGabaritoText(text) {
         const gabarito = {};
         
-        // Padrões comuns de gabarito
-        // Ex: "01 A", "1-A", "01: A", "QUESTÃO 01 - A"
+        console.log(`📝 Parseando gabarito do texto (${text.length} chars)...`);
+        
+        // Padrões comuns de gabarito brasileiro
         const patterns = [
-            /(\d+)\s*[-:.]?\s*([A-E])/gi,
-            /questão\s*(\d+)\s*[-:.]?\s*([A-E])/gi,
-            /q\s*(\d+)\s*[-:.]?\s*([A-E])/gi
+            /questão\s*(?:n[°º]?\s*)?(\d+)\s*[-:.)\s]+\s*([A-E])/gi,
+            /(\d+)\s*[-:.)\s]+\s*([A-E])(?:\s|$|[,;\n])/gi,
+            /(\d+)\s+([A-E])(?:\s|$|[,;\n])/gi
         ];
         
         for (const pattern of patterns) {
@@ -131,11 +132,16 @@ class GabaritoExtractor {
                 const questao = parseInt(match[1]);
                 const resposta = match[2].toUpperCase();
                 
-                if (questao > 0 && questao <= 100 && /[A-E]/.test(resposta)) {
-                    gabarito[questao] = resposta;
+                if (questao > 0 && questao <= 200 && /[A-E]/.test(resposta)) {
+                    // Só grava se ainda não existe (prioridade para padrões mais específicos)
+                    if (!gabarito[questao]) {
+                        gabarito[questao] = resposta;
+                    }
                 }
             }
         }
+        
+        console.log(`✅ Gabarito parseado: ${Object.keys(gabarito).length} respostas encontradas`);
         
         return {
             respostas: gabarito,

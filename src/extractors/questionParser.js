@@ -54,9 +54,9 @@ class QuestionParser {
             const boundary = boundaries[i];
             const nextBoundary = boundaries[i + 1];
             
-            const contentStart = boundary.contentStart;
+            const contentStart = boundary.index; // Incluir o "QUESTÃO XX" no corte
             const contentEnd = nextBoundary ? nextBoundary.index : combinedText.length;
-            const rawContent = combinedText.substring(contentStart, contentEnd).trim();
+            let rawContent = combinedText.substring(boundary.contentStart, contentEnd).trim();
             
             // Determinar páginas que esta questão ocupa
             const questionPages = this.getPagesForRange(
@@ -70,12 +70,16 @@ class QuestionParser {
             const questionImages = this.collectImagesForQuestion(questionPages, pageMarkers);
             const bestImage = this.selectBestImage(questionImages);
             
-            questions.push({
-                numero: boundary.numero,
-                enunciado: this.cleanText(enunciado),
-                alternativas: alternativas ? this.cleanAlternativas(alternativas) : null,
-                imagem_base64: bestImage
-            });
+            // Só adicionar se tem conteúdo real (evitar questões vazias)
+            const enunciadoLimpo = this.cleanText(enunciado);
+            if (enunciadoLimpo.length > 5 || Object.keys(alternativas || {}).length > 0) {
+                questions.push({
+                    numero: boundary.numero,
+                    enunciado: enunciadoLimpo,
+                    alternativas: alternativas ? this.cleanAlternativas(alternativas) : null,
+                    imagem_base64: bestImage
+                });
+            }
         }
         
         return questions;
@@ -85,54 +89,62 @@ class QuestionParser {
      * Encontra os limites de cada questão no texto combinado
      */
     findQuestionBoundaries(text) {
-        const boundaries = [];
+        // Tentar múltiplos padrões, do mais específico ao mais genérico
+        const patternSets = [
+            // Padrão 1: QUESTÃO XX / QUESTÃO Nº XX / Questão XX (FGV, CESPE, FCC, FUNCAB etc.)
+            {
+                name: 'QUESTÃO N',
+                regex: /(?:^|\n)\s*QUEST[ÃA]O\s*(?:N[°º]?\s*)?(\d+)/gi
+            },
+            // Padrão 2: XX - (número seguido de travessão, ex: "21 –" "21-")
+            {
+                name: 'N-',
+                regex: /(?:^|\n)\s*(\d{1,3})\s*[–—-]\s/g
+            },
+            // Padrão 3: XX) ou XX. no início de linha
+            {
+                name: 'N)',
+                regex: /(?:^|\n)\s*(\d{1,3})\s*[.)]\s/g
+            }
+        ];
         
-        // Padrão principal: QUESTÃO XX (FGV, CESPE, FCC, etc.)
-        const mainPattern = /(?:^|\n)\s*QUEST[ÃA]O\s+(\d+)/gi;
-        let match;
-        
-        while ((match = mainPattern.exec(text)) !== null) {
-            boundaries.push({
-                numero: parseInt(match[1]),
-                index: match.index,
-                fullMatch: match[0].trim(),
-                contentStart: match.index + match[0].length
-            });
-        }
-        
-        // Se encontrou questões suficientes com o padrão principal, usar
-        if (boundaries.length >= 3) {
-            boundaries.sort((a, b) => a.index - b.index);
-            return this.deduplicateBoundaries(boundaries);
-        }
-        
-        // Padrão alternativo: "01)" ou "01." no início de linha
-        const altPattern = /(?:^|\n)\s*(\d{1,3})\s*[.)]\s/g;
-        const altBoundaries = [];
-        
-        while ((match = altPattern.exec(text)) !== null) {
-            const numero = parseInt(match[1]);
-            if (numero > 0 && numero <= 200) {
-                altBoundaries.push({
-                    numero,
-                    index: match.index,
-                    fullMatch: match[0].trim(),
-                    contentStart: match.index + match[0].length
-                });
+        for (const ps of patternSets) {
+            const boundaries = [];
+            let match;
+            
+            while ((match = ps.regex.exec(text)) !== null) {
+                const numero = parseInt(match[1]);
+                if (numero > 0 && numero <= 200) {
+                    boundaries.push({
+                        numero,
+                        index: match.index,
+                        fullMatch: match[0].trim(),
+                        contentStart: match.index + match[0].length
+                    });
+                }
+            }
+            
+            if (boundaries.length === 0) continue;
+            
+            // Deduplicate e ordenar por posição
+            const deduped = this.deduplicateBoundaries(boundaries);
+            deduped.sort((a, b) => a.index - b.index);
+            
+            // Aceitar se tem 3+ questões e pelo menos 3 são sequenciais
+            if (deduped.length >= 3 && this.hasSequentialQuestions(deduped, 3)) {
+                console.log(`📌 Padrão de questões detectado: "${ps.name}" (${deduped.length} questões)`);
+                return deduped;
+            }
+            
+            // Aceitar se tem 2 questões (provas curtas)
+            if (deduped.length >= 2) {
+                console.log(`📌 Padrão de questões detectado: "${ps.name}" (${deduped.length} questões)`);
+                return deduped;
             }
         }
         
-        altBoundaries.sort((a, b) => a.index - b.index);
-        
-        // Verificar sequencialidade (mínimo 3 questões consecutivas)
-        if (this.hasSequentialQuestions(altBoundaries, 3)) {
-            return this.deduplicateBoundaries(altBoundaries);
-        }
-        
-        // Retornar o que encontrar, ou vazio
-        return boundaries.length > 0 
-            ? this.deduplicateBoundaries(boundaries) 
-            : [];
+        // Sem padrão encontrado
+        return [];
     }
     
     /**
