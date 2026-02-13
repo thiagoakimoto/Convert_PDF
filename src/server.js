@@ -529,6 +529,13 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             result.pages = result.pages.filter(p => p.pageNumber < cutoffPage);
         }
         
+        // Remover páginas de questões discursivas
+        const antesDisc = result.pages.length;
+        result.pages = result.pages.filter(p => !/quest[õo]es?\s+discursivas?/i.test(p.text || ''));
+        if (result.pages.length < antesDisc) {
+            console.log(`📝 Removidas ${antesDisc - result.pages.length} página(s) de questões discursivas`);
+        }
+        
         // Recalcular summary
         result.allImages = result.pages.flatMap(p => p.images || []);
         result.summary.totalPages = result.pages.length;
