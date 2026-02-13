@@ -529,11 +529,13 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             result.pages = result.pages.filter(p => p.pageNumber < cutoffPage);
         }
         
-        // Remover páginas de questões discursivas
-        const antesDisc = result.pages.length;
-        result.pages = result.pages.filter(p => !/quest[õo]es?\s+discursivas?/i.test(p.text || ''));
-        if (result.pages.length < antesDisc) {
-            console.log(`📝 Removidas ${antesDisc - result.pages.length} página(s) de questões discursivas`);
+        // Remover páginas de questões discursivas (da primeira ocorrência em diante)
+        const discursiveIdx = result.pages.findIndex(p => /quest[õo]es?\s+discursivas?/i.test(p.text || ''));
+        if (discursiveIdx !== -1) {
+            const removidas = result.pages.length - discursiveIdx;
+            const paginaInicio = result.pages[discursiveIdx].pageNumber;
+            result.pages = result.pages.slice(0, discursiveIdx);
+            console.log(`📝 Removidas ${removidas} página(s) de questões discursivas (a partir da pág ${paginaInicio})`);
         }
         
         // Recalcular summary
