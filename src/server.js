@@ -479,28 +479,53 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         result.pages = result.pages.filter(p => p.pageNumber > 1);
         
         // Detectar e remover folhas de respostas (numeração reinicia)
+        // Abordagem em 2 passadas para evitar falsos positivos com números de fórmulas/frações
         const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
-        let maxQ = 0;
-        let cutoffPage = Infinity;
         
-        for (const page of result.pages) {
+        // Passo 1: coletar números detectados em cada página
+        const pageData = result.pages.map(page => {
             questionPattern.lastIndex = 0;
+            const nums = [];
             let m;
             while ((m = questionPattern.exec(page.text || '')) !== null) {
                 const num = parseInt(m[1]);
-                if (num > 0 && num <= 200) {
-                    if (num <= maxQ - 10 && maxQ > 20) {
-                        cutoffPage = page.pageNumber;
-                        break;
-                    }
-                    maxQ = Math.max(maxQ, num);
-                }
+                if (num > 0 && num <= 200) nums.push(num);
             }
-            if (cutoffPage !== Infinity) break;
+            return { pageNumber: page.pageNumber, nums, text: page.text || '' };
+        });
+        
+        // Passo 2: detectar folha de respostas com critérios mais rigorosos
+        let cutoffPage = Infinity;
+        let runningMax = 0;
+        
+        for (const pd of pageData) {
+            // Se a página tem algum número que continua a sequência crescente, atualizar e prosseguir
+            if (pd.nums.some(n => n > runningMax)) {
+                for (const n of pd.nums) runningMax = Math.max(runningMax, n);
+                continue;
+            }
+            
+            // Página não continua a sequência — verificar se é folha de respostas
+            // Pular se contém conteúdo de questões discursivas
+            if (/quest[õo]es?\s+discursivas?/i.test(pd.text)) continue;
+            
+            // Contar números de "reinício" (muito abaixo do máximo atual)
+            const restartNums = pd.nums.filter(n => n <= runningMax * 0.8);
+            
+            // Medir conteúdo textual real (só letras, sem números/espaços/traços)
+            const alphaContent = pd.text.replace(/[^a-záéíóúàâêôãõçA-ZÁÉÍÓÚÀÂÊÔÃÕÇ]/g, '');
+            
+            // Folha de respostas = muitos números baixos + pouco texto real
+            // (Uma folha de respostas típica tem 30+ números e quase nenhum texto)
+            if (restartNums.length >= 10 && alphaContent.length < 500 && runningMax > 20) {
+                cutoffPage = pd.pageNumber;
+                console.log(`📋 Folha de respostas detectada: pág ${cutoffPage} (${restartNums.length} números reiniciados, ${alphaContent.length} chars texto)`);
+                break;
+            }
         }
         
         if (cutoffPage !== Infinity) {
-            console.log(`📋 Folha de respostas detectada a partir da página ${cutoffPage} (removendo)`);
+            console.log(`📋 Removendo folha de respostas a partir da página ${cutoffPage}`);
             result.pages = result.pages.filter(p => p.pageNumber < cutoffPage);
         }
         
