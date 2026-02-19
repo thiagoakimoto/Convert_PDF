@@ -990,7 +990,9 @@
 
         function copyBase64(index) {
             const images = extractedData?.data?.allImages || extractedData?.data?.images || extractedData?.images || [];
-            const base64 = images[index]?.base64;
+            const img = images[index];
+            // Suporta tanto .base64 quanto extrair de .dataUrl
+            const base64 = img?.base64 || (img?.dataUrl ? img.dataUrl.replace(/^data:[^;]+;base64,/, '') : null);
             
             if (base64) {
                 navigator.clipboard.writeText(base64).then(() => {

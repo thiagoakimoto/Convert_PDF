@@ -177,6 +177,7 @@ class PDFExtractor {
     async extractImagesFromBuffer(pdfBuffer, options = {}) {
         const { maxWidth = 800, startPage = 1, pages = null } = options;
         const images = [];
+        const MAX_IMAGES = 150; // Limite de segurança
         
         try {
             const pdfjs = await getPdfjs();
@@ -187,12 +188,26 @@ class PDFExtractor {
             
             const pdfDoc = await loadingTask.promise;
             const numPages = pdfDoc.numPages;
+            let abortedByMemory = false;
             
             for (let pageNum = 1; pageNum <= numPages; pageNum++) {
                 // Pular páginas antes de startPage
                 if (pageNum < startPage) continue;
                 // Filtrar por lista de páginas específicas (economia de memória)
                 if (pages && !pages.includes(pageNum)) continue;
+                // Limite de imagens
+                if (images.length >= MAX_IMAGES) {
+                    console.log(`⚠️ Limite de ${MAX_IMAGES} imagens atingido, parando extração`);
+                    break;
+                }
+                // Verificar pressão de memória (abortar se > 400MB RSS)
+                const memCheck = process.memoryUsage();
+                if (memCheck.rss > 400 * 1024 * 1024) {
+                    console.log(`⚠️ Memória alta: RSS=${(memCheck.rss/1024/1024).toFixed(0)}MB - parando extração de imagens na pág ${pageNum}`);
+                    abortedByMemory = true;
+                    break;
+                }
+                
                 const page = await pdfDoc.getPage(pageNum);
                 const operatorList = await page.getOperatorList();
                 
@@ -215,9 +230,16 @@ class PDFExtractor {
                         }
                     }
                 }
+                
+                // CRUCIAL: liberar recursos da página para não acumular memória
+                page.cleanup();
             }
             
             await pdfDoc.destroy();
+            
+            if (abortedByMemory) {
+                console.log(`⚠️ Extração parcial: ${images.length} imagens (limitada por memória)`);
+            }
             
         } catch (error) {
             console.error('Erro ao extrair imagens com pdfjs:', error.message);
@@ -238,12 +260,12 @@ class PDFExtractor {
      * Extrai uma imagem específica de uma página
      * @param {number} maxWidth - Largura máxima para redimensionamento (null = sem resize)
      */
-    async extractImageFromPage(page, imgName, pageNum, imgIndex, maxWidth = null) {
+    async extractImageFromPage(page, imgName, pageNum, imgIndex, maxWidth = 800) {
         try {
             const objs = page.objs;
             
             // Esperar o objeto da imagem estar disponível
-            const imgObj = await new Promise((resolve, reject) => {
+            let imgObj = await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
                     reject(new Error('Timeout ao carregar imagem'));
                 }, 5000);
@@ -258,9 +280,17 @@ class PDFExtractor {
                 return null;
             }
             
-            const { width, height, data, kind } = imgObj;
+            const { width, height, kind } = imgObj;
+            let rawData = imgObj.data;
+            imgObj = null; // Liberar referência ao objeto original
             
-            if (!width || !height || !data) {
+            if (!width || !height || !rawData) {
+                return null;
+            }
+            
+            // Pular imagens muito pequenas (decorativas, ícones)
+            if (width < 50 || height < 50) {
+                rawData = null;
                 return null;
             }
             
@@ -282,27 +312,31 @@ class PDFExtractor {
             
             // Criar buffer com o tamanho correto
             const expectedSize = width * height * channels;
-            let imageData = data;
             
-            if (data.length !== expectedSize) {
+            if (rawData.length !== expectedSize) {
                 // Tentar ajustar o número de canais
-                if (data.length === width * height * 3) {
+                if (rawData.length === width * height * 3) {
                     channels = 3;
                     inputOptions = { raw: { width, height, channels: 3 } };
-                } else if (data.length === width * height * 4) {
+                } else if (rawData.length === width * height * 4) {
                     channels = 4;
                     inputOptions = { raw: { width, height, channels: 4 } };
-                } else if (data.length === width * height) {
+                } else if (rawData.length === width * height) {
                     channels = 1;
                     inputOptions = { raw: { width, height, channels: 1 } };
                 } else {
-                    console.log(`Tamanho de dados inesperado: ${data.length}, esperado: ${expectedSize}`);
+                    console.log(`Tamanho de dados inesperado: ${rawData.length}, esperado: ${expectedSize}`);
+                    rawData = null;
                     return null;
                 }
             }
             
             // Converter para JPEG Q80 (5-10x menor que PNG, economia enorme de memória)
-            let pipeline = sharp(Buffer.from(imageData), inputOptions);
+            // Usar Buffer.from com shared ArrayBuffer quando possível
+            const inputBuffer = Buffer.from(rawData.buffer, rawData.byteOffset, rawData.byteLength);
+            rawData = null; // Liberar referência ao raw data
+            
+            let pipeline = sharp(inputBuffer, inputOptions);
             
             // Sempre aplicar maxWidth (default 800px) para controlar tamanho
             if (maxWidth && width > maxWidth) {
@@ -310,13 +344,10 @@ class PDFExtractor {
             }
             
             const { data: outputBuffer, info } = await pipeline
-                .jpeg({ quality: 80 })
+                .jpeg({ quality: 75 })
                 .toBuffer({ resolveWithObject: true });
             
             const base64 = outputBuffer.toString('base64');
-            
-            // Liberar referências intermediárias
-            imageData = null;
             
             return {
                 id: `img_${pageNum}_${imgIndex}`,
@@ -325,7 +356,6 @@ class PDFExtractor {
                 height: info.height,
                 format: 'jpeg',
                 mimeType: 'image/jpeg',
-                base64: base64,
                 dataUrl: `data:image/jpeg;base64,${base64}`,
                 sizeBytes: outputBuffer.length
             };
