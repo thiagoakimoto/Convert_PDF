@@ -559,21 +559,25 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
             const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
-            const textoCompleto = gabaritoText.pages.map(p => p.text).join('\n');
             
-            // Pegar apenas o TIPO 1 (tudo entre "TIPO 1" e "TIPO 2")
-            const tipoMatch = textoCompleto.match(/TIPO\s*1\s*\n([\s\S]*?)(?=Professor.*TIPO\s*2|$)/i);
-            const blocoTipo1 = tipoMatch ? tipoMatch[1] : textoCompleto;
+            // Usar APENAS a página 1 do gabarito
+            const paginaGabarito = gabaritoText.pages.find(p => p.pageNumber === 1);
+            const textoPagina1 = paginaGabarito ? paginaGabarito.text : gabaritoText.pages.map(p => p.text).join('\n');
+            console.log(`📋 Usando página 1 do gabarito (${textoPagina1.length} chars)`);
+            
+            // Pegar bloco TIPO 1 (tudo entre "TIPO 1" e "TIPO 2")
+            const tipoMatch = textoPagina1.match(/TIPO\s*1[^\n]*\n([\s\S]*?)(?=TIPO\s*2|$)/i);
+            const blocoTipo1 = tipoMatch ? tipoMatch[1] : textoPagina1;
             
             // Parse: linhas de números seguidas por linhas de letras
             const linhas = blocoTipo1.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             console.log(`📋 Bloco TIPO 1: ${linhas.length} linhas`);
+            console.log(`📋 Primeiras 10 linhas: ${linhas.slice(0, 10).map((l, i) => `[${i}]="${l}"`).join(' | ')}`);
             
+            // Estratégia 1: linhas de números seguidas por linhas de letras
             for (let i = 0; i < linhas.length - 1; i++) {
-                // Linha de números: só dígitos e espaços
                 if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
                 const numeros = linhas[i].match(/\d+/g);
-                // Próxima linha: letras A-E e * separadas por espaço
                 const letras = linhas[i + 1].match(/[A-E*]/gi);
                 
                 if (numeros && letras && numeros.length >= 3 && numeros.length === letras.length) {
@@ -581,12 +585,30 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                         const resp = letras[j].toUpperCase();
                         gabarito_data[numeros[j]] = resp === '*' ? 'ANULADA' : resp;
                     }
-                    i++; // pular a linha de letras já processada
+                    i++;
+                }
+            }
+            
+            // Estratégia 2: pares "número letra" intercalados
+            if (Object.keys(gabarito_data).length === 0) {
+                console.log(`📋 Estratégia 1 falhou, tentando pares número-letra...`);
+                const allTokens = blocoTipo1.replace(/\n/g, ' ').match(/\S+/g) || [];
+                for (let i = 0; i < allTokens.length - 1; i++) {
+                    const num = parseInt(allTokens[i]);
+                    const letra = allTokens[i + 1];
+                    if (num > 0 && num <= 200 && /^[A-E*]$/i.test(letra)) {
+                        gabarito_data[String(num)] = letra.toUpperCase() === '*' ? 'ANULADA' : letra.toUpperCase();
+                        i++;
+                    }
                 }
             }
             
             gabaritoSource = gabaritoFile.originalname;
-            console.log(`✅ Gabarito TIPO 1 parseado: ${Object.keys(gabarito_data).length} respostas`);
+            console.log(`✅ Gabarito TIPO 1 (pág 1): ${Object.keys(gabarito_data).length} respostas`);
+            if (Object.keys(gabarito_data).length > 0) {
+                const amostra = Object.entries(gabarito_data).slice(0, 5).map(([k, v]) => `${k}=${v}`).join(', ');
+                console.log(`📋 Amostra: ${amostra}...`);
+            }
             
             if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
