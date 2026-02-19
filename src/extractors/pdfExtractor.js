@@ -3,6 +3,10 @@ const path = require('path');
 const { PDFDocument } = require('pdf-lib');
 const sharp = require('sharp');
 
+// Otimização de memória: desabilitar cache e limitar threads do sharp
+sharp.cache(false);
+sharp.concurrency(1);
+
 // Importação dinâmica do pdfjs-dist para compatibilidade com ESM
 let pdfjsLib = null;
 
@@ -24,15 +28,14 @@ class PDFExtractor {
      * @param {string} filePath - Caminho do arquivo PDF
      * @returns {Object} - Objeto com texto, imagens e metadados
      */
-    async extractAll(filePath) {
+    async extractAll(filePath, options = {}) {
         const pdfBuffer = fs.readFileSync(filePath);
+        const { maxWidth = 800, pages: pageFilter = null } = options;
         
-        // Extrair texto e imagens em paralelo
-        const [textData, images, metadata] = await Promise.all([
-            this.extractTextFromBuffer(pdfBuffer),
-            this.extractImagesFromBuffer(pdfBuffer),
-            this.extractMetadata(pdfBuffer)
-        ]);
+        // Extrair SEQUENCIALMENTE para economizar memória (não usar Promise.all)
+        const textData = await this.extractTextFromBuffer(pdfBuffer);
+        const images = await this.extractImagesFromBuffer(pdfBuffer, { maxWidth, pages: pageFilter });
+        const metadata = await this.extractMetadata(pdfBuffer);
         
         // Agrupar imagens por página junto com o texto
         const pages = textData.pages.map(page => {
@@ -72,11 +75,9 @@ class PDFExtractor {
         const pdfBuffer = fs.readFileSync(filePath);
         const startPage = skipFirstPage ? 2 : 1;
         
-        // Extrair texto e imagens em paralelo
-        const [textData, images] = await Promise.all([
-            this.extractTextFromBuffer(pdfBuffer),
-            this.extractImagesFromBuffer(pdfBuffer, { maxWidth: maxImageWidth, startPage })
-        ]);
+        // Extrair SEQUENCIALMENTE para economizar memória
+        const textData = await this.extractTextFromBuffer(pdfBuffer);
+        const images = await this.extractImagesFromBuffer(pdfBuffer, { maxWidth: maxImageWidth, startPage });
         
         // Agrupar por página (já filtrado por startPage nas imagens)
         const pages = textData.pages
@@ -174,7 +175,7 @@ class PDFExtractor {
      * @returns {Array} - Array de objetos com imagens em base64
      */
     async extractImagesFromBuffer(pdfBuffer, options = {}) {
-        const { maxWidth = null, startPage = 1 } = options;
+        const { maxWidth = 800, startPage = 1, pages = null } = options;
         const images = [];
         
         try {
@@ -190,6 +191,8 @@ class PDFExtractor {
             for (let pageNum = 1; pageNum <= numPages; pageNum++) {
                 // Pular páginas antes de startPage
                 if (pageNum < startPage) continue;
+                // Filtrar por lista de páginas específicas (economia de memória)
+                if (pages && !pages.includes(pageNum)) continue;
                 const page = await pdfDoc.getPage(pageNum);
                 const operatorList = await page.getOperatorList();
                 
@@ -298,27 +301,33 @@ class PDFExtractor {
                 }
             }
             
-            // Converter para PNG (com resize opcional)
+            // Converter para JPEG Q80 (5-10x menor que PNG, economia enorme de memória)
             let pipeline = sharp(Buffer.from(imageData), inputOptions);
             
+            // Sempre aplicar maxWidth (default 800px) para controlar tamanho
             if (maxWidth && width > maxWidth) {
                 pipeline = pipeline.resize({ width: maxWidth, withoutEnlargement: true });
             }
             
-            const { data: pngBuffer, info } = await pipeline.png().toBuffer({ resolveWithObject: true });
+            const { data: outputBuffer, info } = await pipeline
+                .jpeg({ quality: 80 })
+                .toBuffer({ resolveWithObject: true });
             
-            const base64 = pngBuffer.toString('base64');
+            const base64 = outputBuffer.toString('base64');
+            
+            // Liberar referências intermediárias
+            imageData = null;
             
             return {
                 id: `img_${pageNum}_${imgIndex}`,
                 page: pageNum,
                 width: info.width,
                 height: info.height,
-                format: 'png',
-                mimeType: 'image/png',
+                format: 'jpeg',
+                mimeType: 'image/jpeg',
                 base64: base64,
-                dataUrl: `data:image/png;base64,${base64}`,
-                sizeBytes: pngBuffer.length
+                dataUrl: `data:image/jpeg;base64,${base64}`,
+                sizeBytes: outputBuffer.length
             };
             
         } catch (error) {

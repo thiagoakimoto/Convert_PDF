@@ -474,19 +474,31 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
         
-        // 1. Extrair conteúdo do PDF - MESMA função da interface web (extractAll)
-        console.log(`📄 Extraindo conteúdo da prova...`);
-        const result = await pdfExtractor.extractAll(provaFile.path);
+        // === EXTRAÇÃO OTIMIZADA PARA ECONOMIA DE MEMÓRIA ===
+        // Em vez de extractAll (que carrega tudo em paralelo),
+        // extraímos texto primeiro, filtramos páginas, e só depois extraímos imagens.
         
-        // Remover página 1 (capa/instruções) do resultado
-        result.pages = result.pages.filter(p => p.pageNumber > 1);
+        // 1. Ler buffer da prova uma única vez
+        console.log(`📄 Extraindo conteúdo da prova...`);
+        const pdfBuffer = fs.readFileSync(provaFile.path);
+        const fileSizeMB = (pdfBuffer.length / 1024 / 1024).toFixed(1);
+        console.log(`📄 Arquivo: ${fileSizeMB}MB`);
+        
+        const mem1 = process.memoryUsage();
+        console.log(`💾 Memória inicial: RSS=${(mem1.rss/1024/1024).toFixed(0)}MB, Heap=${(mem1.heapUsed/1024/1024).toFixed(0)}MB`);
+        
+        // 2. Extrair APENAS TEXTO primeiro (baixo uso de memória)
+        const textData = await pdfExtractor.extractTextFromBuffer(pdfBuffer);
+        console.log(`📄 Texto extraído: ${textData.totalPages} páginas`);
+        
+        // 3. Filtrar páginas ANTES de extrair imagens (economia enorme de memória)
+        // Remover página 1 (capa/instruções)
+        let filteredPages = textData.pages.filter(p => p.pageNumber > 1);
         
         // Detectar e remover folhas de respostas (numeração reinicia)
-        // Abordagem em 2 passadas para evitar falsos positivos com números de fórmulas/frações
         const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
         
-        // Passo 1: coletar números detectados em cada página
-        const pageData = result.pages.map(page => {
+        const pageData = filteredPages.map(page => {
             questionPattern.lastIndex = 0;
             const nums = [];
             let m;
@@ -497,29 +509,18 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             return { pageNumber: page.pageNumber, nums, text: page.text || '' };
         });
         
-        // Passo 2: detectar folha de respostas com critérios mais rigorosos
         let cutoffPage = Infinity;
         let runningMax = 0;
         
         for (const pd of pageData) {
-            // Se a página tem algum número que continua a sequência crescente, atualizar e prosseguir
             if (pd.nums.some(n => n > runningMax)) {
                 for (const n of pd.nums) runningMax = Math.max(runningMax, n);
                 continue;
             }
-            
-            // Página não continua a sequência — verificar se é folha de respostas
-            // Pular se contém conteúdo de questões discursivas
             if (/quest[õo]es?\s+discursivas?/i.test(pd.text)) continue;
-            
-            // Contar números de "reinício" (muito abaixo do máximo atual)
             const restartNums = pd.nums.filter(n => n <= runningMax * 0.8);
-            
-            // Medir conteúdo textual real (só letras, sem números/espaços/traços)
             const alphaContent = pd.text.replace(/[^a-záéíóúàâêôãõçA-ZÁÉÍÓÚÀÂÊÔÃÕÇ]/g, '');
             
-            // Folha de respostas = muitos números baixos + pouco texto real
-            // (Uma folha de respostas típica tem 30+ números e quase nenhum texto)
             if (restartNums.length >= 10 && alphaContent.length < 500 && runningMax > 20) {
                 cutoffPage = pd.pageNumber;
                 console.log(`📋 Folha de respostas detectada: pág ${cutoffPage} (${restartNums.length} números reiniciados, ${alphaContent.length} chars texto)`);
@@ -529,26 +530,63 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         
         if (cutoffPage !== Infinity) {
             console.log(`📋 Removendo folha de respostas a partir da página ${cutoffPage}`);
-            result.pages = result.pages.filter(p => p.pageNumber < cutoffPage);
+            filteredPages = filteredPages.filter(p => p.pageNumber < cutoffPage);
         }
         
         // Remover páginas de questões discursivas (da primeira ocorrência em diante)
-        const discursiveIdx = result.pages.findIndex(p => /quest[õo]es?\s+discursivas?/i.test(p.text || ''));
+        const discursiveIdx = filteredPages.findIndex(p => /quest[õo]es?\s+discursivas?/i.test(p.text || ''));
         if (discursiveIdx !== -1) {
-            const removidas = result.pages.length - discursiveIdx;
-            const paginaInicio = result.pages[discursiveIdx].pageNumber;
-            result.pages = result.pages.slice(0, discursiveIdx);
+            const removidas = filteredPages.length - discursiveIdx;
+            const paginaInicio = filteredPages[discursiveIdx].pageNumber;
+            filteredPages = filteredPages.slice(0, discursiveIdx);
             console.log(`📝 Removidas ${removidas} página(s) de questões discursivas (a partir da pág ${paginaInicio})`);
         }
         
-        // Recalcular summary
-        result.allImages = result.pages.flatMap(p => p.images || []);
-        result.summary.totalPages = result.pages.length;
-        result.summary.totalImages = result.allImages.length;
-        result.summary.totalCharacters = result.pages.reduce((s, p) => s + p.characterCount, 0);
-        result.summary.pagesWithImages = result.pages.filter(p => (p.images || []).length > 0).length;
-        result.fullText = result.pages.map(p => p.text).join('\n\n');
+        // 4. Extrair imagens APENAS das páginas que restaram (economia de memória)
+        const keptPageNumbers = filteredPages.map(p => p.pageNumber);
+        console.log(`📄 Extraindo imagens de ${keptPageNumbers.length} páginas (de ${textData.totalPages} total)...`);
         
+        const mem2 = process.memoryUsage();
+        console.log(`💾 Antes das imagens: RSS=${(mem2.rss/1024/1024).toFixed(0)}MB, Heap=${(mem2.heapUsed/1024/1024).toFixed(0)}MB`);
+        
+        const images = await pdfExtractor.extractImagesFromBuffer(pdfBuffer, {
+            maxWidth: 800,
+            pages: keptPageNumbers
+        });
+        
+        // 5. Extrair metadata (leve)
+        const metadata = await pdfExtractor.extractMetadata(pdfBuffer);
+        
+        // 6. Montar resultado no formato esperado
+        const resultPages = filteredPages.map(page => {
+            const pageImages = images.filter(img => img.page === page.pageNumber);
+            return {
+                pageNumber: page.pageNumber,
+                text: page.text,
+                characterCount: page.characterCount,
+                images: pageImages,
+                imageCount: pageImages.length
+            };
+        });
+        
+        const allImages = resultPages.flatMap(p => p.images || []);
+        const fullText = resultPages.map(p => p.text).join('\n\n');
+        
+        const result = {
+            metadata,
+            pages: resultPages,
+            fullText,
+            allImages,
+            summary: {
+                totalPages: resultPages.length,
+                totalImages: allImages.length,
+                totalCharacters: fullText.length,
+                pagesWithImages: resultPages.filter(p => p.imageCount > 0).length
+            }
+        };
+        
+        const mem3 = process.memoryUsage();
+        console.log(`💾 Memória final: RSS=${(mem3.rss/1024/1024).toFixed(0)}MB, Heap=${(mem3.heapUsed/1024/1024).toFixed(0)}MB`);
         console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
         
         // 2. Adicionar campo "questao" em cada imagem
