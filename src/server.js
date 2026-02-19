@@ -464,9 +464,12 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         }
 
         console.log(`\n🎯 Processando prova completa`);
+        console.log(`📄 Campos recebidos: ${req.files?.map(f => `${f.fieldname}="${f.originalname}"`).join(', ') || 'nenhum'}`);
         console.log(`📄 Prova: ${provaFile.originalname} (campo: ${provaFile.fieldname})`);
         if (gabaritoFile) {
             console.log(`📋 Gabarito: ${gabaritoFile.originalname} (campo: ${gabaritoFile.fieldname})`);
+        } else {
+            console.log(`⚠️ Gabarito NÃO encontrado! Campos aceitos: gabarito, answer, respostas, answers`);
         }
         
         const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
@@ -555,27 +558,29 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         // 3. Processar gabarito
         let gabarito_data = {};
         let gabaritoSource = 'nenhum';
-        let textoPagina1 = '';
+        let textoGabarito = '';
         
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
             const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
             
-            // Usar APENAS a página 1 do gabarito
-            const paginaGabarito = gabaritoText.pages.find(p => p.pageNumber === 1);
-            textoPagina1 = paginaGabarito ? paginaGabarito.text : gabaritoText.pages.map(p => p.text).join('\n');
-            console.log(`📋 Usando página 1 do gabarito (${textoPagina1.length} chars)`);
+            // Usar TODAS as páginas do gabarito
+            textoGabarito = gabaritoText.pages.map(p => p.text).join('\n');
+            console.log(`📋 Texto do gabarito: ${textoGabarito.length} chars (${gabaritoText.pages.length} páginas)`);
             
-            // Pegar bloco TIPO 1 (tudo entre "TIPO 1" e "TIPO 2")
-            const tipoMatch = textoPagina1.match(/TIPO\s*1[^\n]*\n([\s\S]*?)(?=TIPO\s*2|$)/i);
-            const blocoTipo1 = tipoMatch ? tipoMatch[1] : textoPagina1;
+            // Tentar isolar o primeiro bloco (TIPO 1, ou primeira cor/caderno)
+            // Funciona com FGV (TIPO 1/2/3), ENEM (cores), CESPE, etc.
+            const blocoMatch = textoGabarito.match(
+                /(?:TIPO\s*1|Caderno\s*\d+)[^\n]*\n([\s\S]*?)(?=TIPO\s*2|Caderno\s*\d+|$)/i
+            );
+            const blocoGabarito = blocoMatch ? blocoMatch[1] : textoGabarito;
             
-            // Parse: linhas de números seguidas por linhas de letras
-            const linhas = blocoTipo1.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-            console.log(`📋 Bloco TIPO 1: ${linhas.length} linhas`);
+            // Parse com 4 estratégias
+            const linhas = blocoGabarito.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+            console.log(`📋 Bloco gabarito: ${linhas.length} linhas`);
             console.log(`📋 Primeiras 10 linhas: ${linhas.slice(0, 10).map((l, i) => `[${i}]="${l}"`).join(' | ')}`);
             
-            // Estratégia 1: linhas de números seguidas por linhas de letras (formato limpo)
+            // Estratégia 1: linhas de números seguidas por linhas de letras (formato tabela limpo)
             for (let i = 0; i < linhas.length - 1; i++) {
                 if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
                 const numeros = linhas[i].match(/\d+/g);
@@ -590,11 +595,10 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 }
             }
             
-            // Estratégia 2: linhas com números e letras misturados (tabela extraída em colunas)
-            // Ex: "1\nA\n2\nC\n3\nC" ou "1 A 2 C 3 C"
+            // Estratégia 2: pares número-letra intercalados ("1 A 2 C 3 C" ou "1\nA\n2\nC")
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 1 falhou, tentando pares número-letra...`);
-                const allTokens = blocoTipo1.replace(/\n/g, ' ').match(/\S+/g) || [];
+                const allTokens = blocoGabarito.replace(/\n/g, ' ').match(/\S+/g) || [];
                 for (let i = 0; i < allTokens.length - 1; i++) {
                     const num = parseInt(allTokens[i]);
                     const letra = allTokens[i + 1];
@@ -605,10 +609,9 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 }
             }
             
-            // Estratégia 3: números e letras extraídos separadamente (todos os números, depois todas as letras)
+            // Estratégia 3: blocos separados (todas as linhas de números + todas as linhas de letras)
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 2 falhou, tentando blocos separados...`);
-                // Coletar todas as linhas só de números e todas as linhas só de letras
                 const linhasNums = [];
                 const linhasLetras = [];
                 for (const l of linhas) {
@@ -623,10 +626,10 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 }
             }
             
-            // Estratégia 4: regex mais flexível - buscar "número espaço(s) letra" em qualquer lugar
+            // Estratégia 4: regex flexível - "número espaço(s) letra" em qualquer contexto
             if (Object.keys(gabarito_data).length === 0) {
-                console.log(`📋 Estratégia 3 falhou, tentando regex flexível no texto todo...`);
-                const pares = blocoTipo1.matchAll(/\b(\d{1,3})\s+([A-E*])\b/gi);
+                console.log(`📋 Estratégia 3 falhou, tentando regex flexível...`);
+                const pares = blocoGabarito.matchAll(/\b(\d{1,3})\s+([A-E*])\b/gi);
                 for (const par of pares) {
                     const num = parseInt(par[1]);
                     if (num > 0 && num <= 200) {
@@ -637,7 +640,7 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             }
             
             gabaritoSource = gabaritoFile.originalname;
-            console.log(`✅ Gabarito TIPO 1 (pág 1): ${Object.keys(gabarito_data).length} respostas`);
+            console.log(`✅ Gabarito parseado: ${Object.keys(gabarito_data).length} respostas`);
             if (Object.keys(gabarito_data).length > 0) {
                 const amostra = Object.entries(gabarito_data).slice(0, 5).map(([k, v]) => `${k}=${v}`).join(', ');
                 console.log(`📋 Amostra: ${amostra}...`);
@@ -675,9 +678,13 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             gabarito_data: gabaritoString
         };
         
-        // DEBUG: incluir texto bruto da página 1 do gabarito se veio vazio
-        if (gabaritoFile && !gabaritoString) {
-            response._debug_gabarito_pag1 = textoPagina1 || 'texto não disponível';
+        // DEBUG: incluir texto bruto do gabarito se veio vazio
+        if (!gabaritoString) {
+            response._debug_campos_recebidos = req.files?.map(f => f.fieldname) || [];
+            response._debug_gabarito_encontrado = !!gabaritoFile;
+            if (gabaritoFile) {
+                response._debug_gabarito_texto = textoGabarito || 'texto não disponível';
+            }
         }
         
         res.json(response);
