@@ -611,7 +611,19 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             const blocoMatch = textoGabarito.match(
                 /(?:TIPO\s*1|Caderno\s*\d+)[^\n]*\n([\s\S]*?)(?=TIPO\s*2|Caderno\s*\d+|$)/i
             );
-            const blocoGabarito = blocoMatch ? blocoMatch[1] : textoGabarito;
+            
+            // Validar se o bloco isolado realmente contém pares questão-resposta
+            // Se não contém (ex: ENEM onde CADERNO 1/7 ficam entre seções), usar texto completo
+            let blocoGabarito;
+            if (blocoMatch) {
+                const temPares = /\b\d{1,3}\s+[A-E]\b/i.test(blocoMatch[1]);
+                blocoGabarito = temPares ? blocoMatch[1] : textoGabarito;
+                if (!temPares) {
+                    console.log(`📋 Bloco isolado não contém pares Q-R, usando texto completo`);
+                }
+            } else {
+                blocoGabarito = textoGabarito;
+            }
             
             // Parse com 4 estratégias
             const linhas = blocoGabarito.split('\n').map(l => l.trim()).filter(l => l.length > 0);
@@ -634,15 +646,21 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             }
             
             // Estratégia 2: pares número-letra intercalados ("1 A 2 C 3 C" ou "1\nA\n2\nC")
+            // Suporta "Anulado" e linhas bilíngues tipo "1 D B" (pega primeira letra)
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 1 falhou, tentando pares número-letra...`);
                 const allTokens = blocoGabarito.replace(/\n/g, ' ').match(/\S+/g) || [];
                 for (let i = 0; i < allTokens.length - 1; i++) {
                     const num = parseInt(allTokens[i]);
-                    const letra = allTokens[i + 1];
-                    if (num > 0 && num <= 200 && /^[A-E*]$/i.test(letra)) {
-                        gabarito_data[String(num)] = letra.toUpperCase() === '*' ? 'ANULADA' : letra.toUpperCase();
-                        i++;
+                    const next = allTokens[i + 1];
+                    if (num > 0 && num <= 200) {
+                        if (/^[A-E*]$/i.test(next)) {
+                            gabarito_data[String(num)] = next.toUpperCase() === '*' ? 'ANULADA' : next.toUpperCase();
+                            i++;
+                        } else if (/^anulad/i.test(next)) {
+                            gabarito_data[String(num)] = 'ANULADA';
+                            i++;
+                        }
                     }
                 }
             }
@@ -664,15 +682,15 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 }
             }
             
-            // Estratégia 4: regex flexível - "número espaço(s) letra" em qualquer contexto
+            // Estratégia 4: regex flexível - "número espaço(s) letra/Anulado" em qualquer contexto
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 3 falhou, tentando regex flexível...`);
-                const pares = blocoGabarito.matchAll(/\b(\d{1,3})\s+([A-E*])\b/gi);
+                const pares = blocoGabarito.matchAll(/\b(\d{1,3})\s+([A-E*]|Anulad[oa])\b/gi);
                 for (const par of pares) {
                     const num = parseInt(par[1]);
                     if (num > 0 && num <= 200) {
                         const resp = par[2].toUpperCase();
-                        gabarito_data[String(num)] = resp === '*' ? 'ANULADA' : resp;
+                        gabarito_data[String(num)] = /^ANULAD/i.test(resp) ? 'ANULADA' : (resp === '*' ? 'ANULADA' : resp);
                     }
                 }
             }

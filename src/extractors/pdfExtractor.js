@@ -177,7 +177,7 @@ class PDFExtractor {
     async extractImagesFromBuffer(pdfBuffer, options = {}) {
         const { maxWidth = 800, startPage = 1, pages = null } = options;
         const images = [];
-        const MAX_IMAGES = 150; // Limite de segurança
+        const MAX_IMAGES = 300; // Limite de segurança (150 era pouco para ENEM 64 pgs)
         
         try {
             const pdfjs = await getPdfjs();
