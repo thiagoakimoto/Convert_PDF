@@ -182,6 +182,12 @@ class PDFExtractor {
                 delete currentQuestion.textItems;
             }
             
+            // DEBUG - log página 8
+            if (pageNum === 8 && questionRanges.length > 0) {
+                console.log(`DEBUG pág ${pageNum}: ${questionRanges.length} questionRanges detectados:`, 
+                    questionRanges.map(q => `Q${q.numero} [${q.yMin?.toFixed(1) || 'null'}-${q.yMax?.toFixed(1) || 'null'}]`).join(', '));
+            }
+            
             pages.push({
                 pageNumber: pageNum,
                 text: pageText.trim(),
@@ -274,6 +280,12 @@ class PDFExtractor {
                             const imgData = await this.extractImageFromPage(page, imgName, pageNum, images.length + 1, maxWidth);
                             if (imgData) {
                                 imgData.yPos = imgYPos;
+                                
+                                // DEBUG - log imagem página 8
+                                if (pageNum === 8) {
+                                    console.log(`DEBUG pág ${pageNum}: Imagem ${imgData.id} extraída com yPos=${imgYPos?.toFixed(1) || 'null'}`);
+                                }
+                                
                                 images.push(imgData);
                             }
                         } catch (imgError) {
