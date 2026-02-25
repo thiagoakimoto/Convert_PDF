@@ -75,24 +75,117 @@ class PDFExtractor {
         const pdfBuffer = fs.readFileSync(filePath);
         const startPage = skipFirstPage ? 2 : 1;
         
-        // Extrair SEQUENCIALMENTE para economizar memória
-        const textData = await this.extractTextFromBuffer(pdfBuffer);
-        const images = await this.extractImagesFromBuffer(pdfBuffer, { maxWidth: maxImageWidth, startPage });
+        // NOVA ABORDAGEM: Extrair texto e imagens JUNTOS, rastreando ordem de aparição
+        const result = await this.extractWithFlowOrder(pdfBuffer, { maxWidth: maxImageWidth, startPage });
         
-        // Agrupar por página (já filtrado por startPage nas imagens)
-        const pages = textData.pages
-            .filter(p => p.pageNumber >= startPage)
-            .map(page => {
-                const pageImages = images.filter(img => img.page === page.pageNumber);
-                return {
-                    pageNumber: page.pageNumber,
-                    text: page.text,
-                    images: pageImages,
-                    questionRanges: page.questionRanges || []
-                };
+        return result;
+    }
+    
+    /**
+     * Extrai texto e imagens preservando a ordem de aparição no fluxo do PDF
+     * Isso permite associar cada imagem à questão correta baseado na ordem de renderização
+     */
+    async extractWithFlowOrder(pdfBuffer, options = {}) {
+        const { maxWidth = 800, startPage = 1 } = options;
+        const pdfjs = await getPdfjs();
+        const MAX_IMAGES = 300;
+        
+        const loadingTask = pdfjs.getDocument({
+            data: new Uint8Array(pdfBuffer),
+            useSystemFonts: true
+        });
+        
+        const pdfDoc = await loadingTask.promise;
+        const numPages = pdfDoc.numPages;
+        const pages = [];
+        let totalImages = 0;
+        
+        for (let pageNum = 1; pageNum <= numPages; pageNum++) {
+            if (pageNum < startPage) continue;
+            if (totalImages >= MAX_IMAGES) break;
+            
+            const page = await pdfDoc.getPage(pageNum);
+            const textContent = await page.getTextContent();
+            
+            // Extrair texto com posição no fluxo
+            let pageText = '';
+            let lastY = null;
+            const questoesNaPagina = []; // { numero, charIndex }
+            
+            for (const item of textContent.items) {
+                if (item.str) {
+                    const itemY = item.transform[5];
+                    
+                    // Detectar quebras de linha
+                    if (lastY !== null && Math.abs(lastY - itemY) > 5) {
+                        pageText += '\n';
+                    }
+                    
+                    // Detectar início de questão ANTES de adicionar o texto
+                    const qMatch = item.str.match(/Quest[ãa]o\s+(\d{1,3})/i);
+                    if (qMatch) {
+                        const num = parseInt(qMatch[1]);
+                        if (num > 0 && num <= 200) {
+                            questoesNaPagina.push({
+                                numero: num,
+                                charIndex: pageText.length // Posição onde a questão começa
+                            });
+                        }
+                    }
+                    
+                    pageText += item.str;
+                    lastY = itemY;
+                }
+            }
+            
+            // Extrair imagens da página
+            const pageImages = [];
+            const operatorList = await page.getOperatorList();
+            
+            // Contar operações de texto antes de cada imagem para determinar ordem
+            let textOpCount = 0;
+            
+            for (let i = 0; i < operatorList.fnArray.length; i++) {
+                const fn = operatorList.fnArray[i];
+                
+                // Contar operações de texto (showText=42, showSpacedText=43)
+                if (fn === 42 || fn === 43) {
+                    textOpCount++;
+                }
+                
+                // OPS.paintImageXObject = 85, OPS.paintInlineImageXObject = 86
+                if (fn === 85 || fn === 86) {
+                    if (totalImages >= MAX_IMAGES) break;
+                    
+                    try {
+                        const imgName = operatorList.argsArray[i][0];
+                        const imgData = await this.extractImageFromPage(page, imgName, pageNum, totalImages + 1, maxWidth);
+                        
+                        if (imgData) {
+                            // Guardar a ordem de aparição no fluxo
+                            imgData.flowOrder = textOpCount;
+                            pageImages.push(imgData);
+                            totalImages++;
+                        }
+                    } catch (err) {
+                        // Ignorar erros de imagens individuais
+                    }
+                }
+            }
+            
+            pages.push({
+                pageNumber: pageNum,
+                text: pageText.trim(),
+                images: pageImages,
+                questoes: questoesNaPagina // { numero, charIndex }
             });
+            
+            page.cleanup();
+        }
         
-        return { pages, totalPages: textData.totalPages };
+        await pdfDoc.destroy();
+        
+        return { pages, totalPages: numPages };
     }
     
     /**
