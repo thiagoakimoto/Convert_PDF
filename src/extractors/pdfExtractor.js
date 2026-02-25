@@ -83,7 +83,7 @@ class PDFExtractor {
     
     /**
      * Extrai texto e imagens preservando a ordem de aparição no fluxo do PDF
-     * Isso permite associar cada imagem à questão correta baseado na ordem de renderização
+     * NOVA LÓGICA: Rastreia qual questão está ativa quando cada imagem aparece
      */
     async extractWithFlowOrder(pdfBuffer, options = {}) {
         const { maxWidth = 800, startPage = 1 } = options;
@@ -106,8 +106,9 @@ class PDFExtractor {
             
             const page = await pdfDoc.getPage(pageNum);
             const textContent = await page.getTextContent();
+            const operatorList = await page.getOperatorList();
             
-            // Extrair texto com posição no fluxo
+            // PASSO 1: Extrair texto e detectar questões
             let pageText = '';
             let lastY = null;
             const questoesNaPagina = []; // { numero, charIndex }
@@ -116,19 +117,17 @@ class PDFExtractor {
                 if (item.str) {
                     const itemY = item.transform[5];
                     
-                    // Detectar quebras de linha
                     if (lastY !== null && Math.abs(lastY - itemY) > 5) {
                         pageText += '\n';
                     }
                     
-                    // Detectar início de questão ANTES de adicionar o texto
                     const qMatch = item.str.match(/Quest[ãa]o\s+(\d{1,3})/i);
                     if (qMatch) {
                         const num = parseInt(qMatch[1]);
                         if (num > 0 && num <= 200) {
                             questoesNaPagina.push({
                                 numero: num,
-                                charIndex: pageText.length // Posição onde a questão começa
+                                charIndex: pageText.length
                             });
                         }
                     }
@@ -138,17 +137,27 @@ class PDFExtractor {
                 }
             }
             
-            // Extrair imagens da página
-            const pageImages = [];
-            const operatorList = await page.getOperatorList();
+            // Remover duplicatas mantendo ordem
+            const seen = new Set();
+            const questoesUnicas = questoesNaPagina.filter(q => {
+                if (seen.has(q.numero)) return false;
+                seen.add(q.numero);
+                return true;
+            });
             
-            // Contar operações de texto antes de cada imagem para determinar ordem
+            // PASSO 2: Contar total de operações de texto na página
+            let totalTextOps = 0;
+            for (const fn of operatorList.fnArray) {
+                if (fn === 42 || fn === 43) totalTextOps++;
+            }
+            
+            // PASSO 3: Extrair imagens com flowOrder
+            const pageImages = [];
             let textOpCount = 0;
             
             for (let i = 0; i < operatorList.fnArray.length; i++) {
                 const fn = operatorList.fnArray[i];
                 
-                // Contar operações de texto (showText=42, showSpacedText=43)
                 if (fn === 42 || fn === 43) {
                     textOpCount++;
                 }
@@ -162,13 +171,31 @@ class PDFExtractor {
                         const imgData = await this.extractImageFromPage(page, imgName, pageNum, totalImages + 1, maxWidth);
                         
                         if (imgData) {
-                            // Guardar a ordem de aparição no fluxo
                             imgData.flowOrder = textOpCount;
+                            imgData.flowRatio = totalTextOps > 0 ? textOpCount / totalTextOps : 0;
+                            
+                            // NOVO: Determinar qual questão com base na posição no fluxo
+                            if (questoesUnicas.length === 1) {
+                                // Só uma questão na página → imagem pertence a ela
+                                imgData.questaoDetectada = questoesUnicas[0].numero;
+                            } else if (questoesUnicas.length > 1) {
+                                // Múltiplas questões → calcular proporcionalmente
+                                // flowRatio indica em qual % do texto a imagem aparece
+                                // Usar isso para determinar qual questão
+                                const questaoIndex = Math.floor(imgData.flowRatio * questoesUnicas.length);
+                                const idx = Math.min(questaoIndex, questoesUnicas.length - 1);
+                                imgData.questaoDetectada = questoesUnicas[idx].numero;
+                            } else {
+                                imgData.questaoDetectada = null;
+                            }
+                            
                             pageImages.push(imgData);
                             totalImages++;
+                            
+                            console.log(`Pág ${pageNum}: Imagem ${imgData.id} flow=${textOpCount}/${totalTextOps} (${(imgData.flowRatio*100).toFixed(0)}%) → Q${imgData.questaoDetectada}`);
                         }
                     } catch (err) {
-                        // Ignorar erros de imagens individuais
+                        // Ignorar erros
                     }
                 }
             }
@@ -177,7 +204,7 @@ class PDFExtractor {
                 pageNumber: pageNum,
                 text: pageText.trim(),
                 images: pageImages,
-                questoes: questoesNaPagina // { numero, charIndex }
+                questoes: questoesUnicas
             });
             
             page.cleanup();

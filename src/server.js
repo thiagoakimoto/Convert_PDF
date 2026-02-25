@@ -12,102 +12,29 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /**
- * Tag imagens com suas respectivas questões - ANÁLISE POR QUESTÃO
+ * Tag imagens com suas respectivas questões - BASEADO NA ORDEM DE RENDERIZAÇÃO
  * 
- * Lógica:
- * 1. Dividir o texto da página em blocos por questão
- * 2. Analisar cada bloco para ver se FAZ REFERÊNCIA a imagem (texto, figura, gráfico, etc.)
- * 3. Atribuir imagens apenas às questões que referenciam imagens
- * 4. Se mais de uma questão referencia imagem, distribuir na ordem de aparição
+ * A questão é detectada no extrator (pdfExtractor) baseado em:
+ * - Posição da imagem no fluxo de operações do PDF
+ * - Proporção de texto renderizado antes da imagem
+ * - Isso determina a qual questão a imagem pertence
+ * 
+ * SEM PALAVRAS-CHAVE - apenas ordem de aparição
  */
 function tagImagensComQuestao(pages) {
-    console.log(`\n=== Tagging por ANÁLISE DE CONTEÚDO ===`);
-    
-    // Padrões que indicam referência a imagem
-    const padraoReferenciaImagem = /(?:observe|analise|figura|imagem|gráfico|tabela|mapa|quadro|charge|tirinha|cartaz|propaganda|anúncio|disponível em|fonte:|adaptado de)/i;
+    console.log(`\n=== Tagging por ORDEM DE RENDERIZAÇÃO ===`);
     
     for (const page of pages) {
-        const { pageNumber, images, text, questoes } = page;
+        const { pageNumber, images } = page;
         
         if (!images || images.length === 0) continue;
         
-        // Detectar questões se não vieram do extrator
-        let questoesOrdenadas = questoes || [];
-        if (questoesOrdenadas.length === 0) {
-            const regex = /Quest[ãa]o\s+(\d{1,3})/gi;
-            let match;
-            while ((match = regex.exec(text)) !== null) {
-                const num = parseInt(match[1]);
-                if (num > 0 && num <= 200) {
-                    questoesOrdenadas.push({ numero: num, charIndex: match.index });
-                }
-            }
-        }
+        console.log(`\nPág ${pageNumber}: ${images.length} imagens`);
         
-        // Ordenar por charIndex
-        questoesOrdenadas.sort((a, b) => a.charIndex - b.charIndex);
-        
-        // Remover duplicatas
-        const seen = new Set();
-        questoesOrdenadas = questoesOrdenadas.filter(q => {
-            if (seen.has(q.numero)) return false;
-            seen.add(q.numero);
-            return true;
-        });
-        
-        console.log(`\nPág ${pageNumber}: ${questoesOrdenadas.length} questões, ${images.length} imagens`);
-        
-        // Sem questões → sem atribuição
-        if (questoesOrdenadas.length === 0) {
-            images.forEach(img => { img.questao = null; });
-            console.log(`  ⚠️ Sem questões - imagens descartadas`);
-            continue;
-        }
-        
-        // Extrair o texto de cada questão (do início até a próxima questão)
-        const questoesComTexto = questoesOrdenadas.map((q, idx) => {
-            const inicioTexto = q.charIndex;
-            const fimTexto = idx < questoesOrdenadas.length - 1 
-                ? questoesOrdenadas[idx + 1].charIndex 
-                : text.length;
-            const textoQuestao = text.substring(inicioTexto, fimTexto);
-            
-            // Verificar se esta questão faz referência a imagem
-            const referenciaImagem = padraoReferenciaImagem.test(textoQuestao);
-            
-            return {
-                ...q,
-                textoQuestao,
-                referenciaImagem
-            };
-        });
-        
-        // Filtrar apenas questões que referenciam imagens
-        const questoesComImagem = questoesComTexto.filter(q => q.referenciaImagem);
-        
-        console.log(`  Questões que referenciam imagem: ${questoesComImagem.map(q => `Q${q.numero}`).join(', ') || 'nenhuma'}`);
-        
-        // Se nenhuma questão referencia imagem, atribuir à primeira questão
-        if (questoesComImagem.length === 0) {
-            const primeiraQuestao = questoesOrdenadas[0].numero;
-            images.forEach(img => { img.questao = primeiraQuestao; });
-            console.log(`  → Fallback: todas as imagens → Q${primeiraQuestao}`);
-            continue;
-        }
-        
-        // Distribuir imagens para as questões que referenciam, na ordem
-        // Ordenar imagens por ordem de aparição (flowOrder)
-        const imgsOrdenadas = [...images].sort((a, b) => (a.flowOrder || 0) - (b.flowOrder || 0));
-        
-        for (let i = 0; i < imgsOrdenadas.length; i++) {
-            const img = imgsOrdenadas[i];
-            
-            // Atribuir à questão correspondente (na ordem)
-            // Se há mais imagens que questões com referência, as extras vão para a última
-            const questaoIndex = Math.min(i, questoesComImagem.length - 1);
-            img.questao = questoesComImagem[questaoIndex].numero;
-            
-            console.log(`  → Imagem ${img.id} → Q${img.questao}`);
+        for (const img of images) {
+            // Usar a questão detectada pelo extrator (baseado em flowRatio)
+            img.questao = img.questaoDetectada || null;
+            console.log(`  → ${img.id} → Q${img.questao} (flow=${img.flowOrder}, ratio=${((img.flowRatio||0)*100).toFixed(0)}%)`);
         }
     }
     
