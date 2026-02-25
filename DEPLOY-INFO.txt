@@ -1,0 +1,42 @@
+============================================================
+  PDF Image Extractor API - Informações para Deploy
+============================================================
+
+1. VISÃO GERAL
+------------------------------------------------------------
+Nome:        pdf-image-extractor-api
+Descrição:   API REST para extrair texto, imagens e gabarito
+             de PDFs de provas de concursos públicos
+Repositório: https://github.com/thiagoakimoto/Convert_PDF.git
+Branch:      main
+Licença:     MIT
+
+2. TECNOLOGIAS
+------------------------------------------------------------
+Linguagem:   JavaScript (Node.js)
+Runtime:     Node.js >= 18 (desenvolvido com v24.12.0)
+Gerenciador: npm (v11.7.0)
+Framework:   Express 4.18.x
+
+3. DEPENDÊNCIAS DE PRODUÇÃO
+------------------------------------------------------------
+express        ^4.18.2    - Framework web
+cors           ^2.8.5     - Middleware CORS
+multer         ^1.4.5     - Upload de arquivos (multipart/form-data)
+pdf-lib        ^1.17.1    - Manipulação de PDF (fallback imagens)
+pdfjs-dist     ^4.0.379   - Extração de texto e imagens de PDF
+sharp          ^0.33.2    - Processamento de imagens (requer libvips nativo)
+tesseract.js   ^5.0.4     - OCR para gabaritos em imagem
+uuid           ^9.0.1     - Geração de IDs únicos
+
+Dependência de desenvolvimento:
+nodemon        ^3.0.3     - Hot-reload (somente dev)
+
+4. DEPENDÊNCIAS NATIVAS (SO)
+------------------------------------------------------------
+- sharp requer libvips. Em sistemas Debian/Ubuntu:
+  apt-get install -y build-essential libvips-dev
+- Em imagem Docker node:18-slim ou node:20-slim, instalar:
+  apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libvips-dev
+

@@ -13,114 +13,106 @@ const PORT = process.env.PORT || 3000;
 
 /**
  * Adiciona campo "questao" em cada imagem indicando a qual questão pertence.
- * Usa posição Y (coordenadas do PDF) para matching espacial preciso.
- * Fallback para detecção estrita "QUESTÃO XX" quando posições não disponíveis.
+ * Estratégia: detectar "QUESTÃO XX" estritamente, extrair texto de cada questão,
+ * verificar se menciona imagem, distribuir imagens sequencialmente.
  */
 function tagImagensComQuestao(pages) {
+    // Keywords expandidas que indicam presença de imagem
+    const IMG_KEYWORDS = /imagem|figura|observ[ea]|analis[ea]|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|seguir|foto|reprodu[çcz]|cena|obra|pintura|dispon[ií]vel\s+em|adaptado|charge|cartaz|infogr[aá]f|esquema|diagrama|planta|desenho|fotografia|retrato|\barte\b|exposição/i;
+    
     for (const page of pages) {
+        const text = page.text || '';
         const images = page.images || [];
         if (images.length === 0) continue;
         
-        // Usar questionPositions do extrator (padrão estrito QUESTÃO XX + coord Y)
-        let qPositions = page.questionPositions || [];
+        // Detectar questões com regex ESTRITA (precisa ter "Questão" antes do número)
+        const pattern = /Quest[ãa]o\s+(\d{1,3})/gi;
+        const questoes = [];
+        let match;
         
-        // Fallback: detectar do texto com padrão estrito (sem Y)
-        if (qPositions.length === 0) {
-            const pattern = /Quest[ãa]o\s+(\d{1,3})/gi;
-            let match;
-            while ((match = pattern.exec(page.text || '')) !== null) {
-                const numero = parseInt(match[1]);
-                if (numero > 0 && numero <= 200) {
-                    qPositions.push({ numero, yPos: null });
+        while ((match = pattern.exec(text)) !== null) {
+            const numero = parseInt(match[1]);
+            if (numero > 0 && numero <= 200) {
+                // Evitar duplicatas (às vezes "QUESTÃO XX" aparece 2x no texto)
+                if (questoes.length === 0 || questoes[questoes.length - 1].numero !== numero) {
+                    questoes.push({ numero, startIndex: match.index });
                 }
             }
         }
         
-        // Deduplicar (mesmo número pode aparecer 2x se capturado nos dois caminhos)
-        const seen = new Set();
-        qPositions = qPositions.filter(q => {
-            if (seen.has(q.numero)) return false;
-            seen.add(q.numero);
-            return true;
-        });
-        
-        if (qPositions.length === 0) {
+        if (questoes.length === 0) {
+            // Sem questão detectada → null
             images.forEach(img => { img.questao = null; });
             continue;
         }
         
-        if (qPositions.length === 1) {
-            images.forEach(img => { img.questao = qPositions[0].numero; });
+        if (questoes.length === 1) {
+            // Única questão → todas as imagens são dela
+            images.forEach(img => { img.questao = questoes[0].numero; });
             continue;
         }
         
-        // Verificar se temos dados de posição Y disponíveis
-        const temPosicaoY = qPositions.some(q => q.yPos != null) && images.some(i => i.yPos != null);
+        // Múltiplas questões → extrair texto de cada uma
+        const questoesComTexto = questoes.map((q, i) => {
+            const start = q.startIndex;
+            const end = i + 1 < questoes.length ? questoes[i + 1].startIndex : text.length;
+            const textoQuestao = text.substring(start, end);
+            const temReferencia = IMG_KEYWORDS.test(textoQuestao);
+            return { numero: q.numero, texto: textoQuestao, temReferencia };
+        });
         
-        if (temPosicaoY) {
-            // === MATCHING POR POSIÇÃO Y (preciso) ===
-            // Em coordenadas PDF: Y cresce de baixo pra cima
-            // Questão com yPos maior está mais acima na página
-            // Ordenar questões por Y decrescente (topo → base)
-            const sortedQ = [...qPositions].filter(q => q.yPos != null).sort((a, b) => b.yPos - a.yPos);
-            
-            if (sortedQ.length === 0) {
-                // Sem Y válido, usar primeira questão
-                images.forEach(img => { img.questao = qPositions[0].numero; });
-                continue;
-            }
-            
-            for (const img of images) {
-                const imgY = img.yPos;
-                
-                if (imgY == null) {
-                    // Sem posição — atribuir à última questão da página
-                    img.questao = sortedQ[sortedQ.length - 1].numero;
-                    continue;
-                }
-                
-                // Encontrar a questão cujo cabeçalho está logo ACIMA da imagem
-                // Iterar de cima pra baixo; a última questão com yPos >= imgY é a correta
-                let bestQuestion = sortedQ[0]; // default: questão mais acima
-                for (const q of sortedQ) {
-                    if (q.yPos >= imgY - 30) { // 30 unidades de tolerância (~0.4 cm)
-                        bestQuestion = q;
+        // Estratégia 1: Se apenas 1 imagem, dar para a primeira questão COM referência
+        if (images.length === 1) {
+            const qComRef = questoesComTexto.find(q => q.temReferencia);
+            const questaoEscolhida = qComRef ? qComRef.numero : questoesComTexto[0].numero;
+            images[0].questao = questaoEscolhida;
+            continue;
+        }
+        
+        // Estratégia 2: Distribuir imagens sequencialmente para questões que têm referência
+        const questoesComImg = questoesComTexto.filter(q => q.temReferencia);
+        
+        if (questoesComImg.length === 0) {
+            // Nenhuma tem referência explícita → distribuir igualmente ou dar para a primeira
+            const qPorImg = Math.ceil(images.length / questoesComTexto.length);
+            let idx = 0;
+            for (const q of questoesComTexto) {
+                const count = Math.min(qPorImg, images.length - idx);
+                for (let i = 0; i < count; i++) {
+                    if (idx < images.length) {
+                        images[idx].questao = q.numero;
+                        idx++;
                     }
                 }
-                
-                img.questao = bestQuestion.numero;
             }
-        } else {
-            // === FALLBACK SEM POSIÇÃO Y ===
-            // Usar ordem de aparição no texto + heurísticas simples
-            // Detectar limites de cada questão no texto
-            const text = page.text || '';
-            const questoesTexto = [];
-            for (let i = 0; i < qPositions.length; i++) {
-                const q = qPositions[i];
-                const re = new RegExp('Quest[ãa]o\\s+' + q.numero + '\\b', 'i');
-                const m = re.exec(text);
-                const startIdx = m ? m.index : 0;
-                const endIdx = i + 1 < qPositions.length
-                    ? (() => { const re2 = new RegExp('Quest[ãa]o\\s+' + qPositions[i+1].numero + '\\b', 'i'); const m2 = re2.exec(text); return m2 ? m2.index : text.length; })()
-                    : text.length;
-                questoesTexto.push({ numero: q.numero, texto: text.substring(startIdx, endIdx) });
+        } else if (questoesComImg.length === images.length) {
+            // Perfeito: cada questão com ref pega 1 imagem
+            for (let i = 0; i < images.length; i++) {
+                images[i].questao = questoesComImg[i].numero;
             }
-            
-            // Se apenas 1 imagem, atribuir à primeira questão que começa com referência (Disponível em, etc.)
-            // ou à primeira questão se nenhuma tem referência
-            const IMG_HINTS = /dispon[ií]vel\s+em|adaptado|(?:^Quest[ãa]o\s+\d+\s*\n\s*(?:[A-Z][^a-z]{0,30}\n))/i;
-            
-            const imgQueue = [...images];
-            for (const q of questoesTexto) {
-                if (imgQueue.length === 0) break;
-                if (IMG_HINTS.test(q.texto.substring(0, 200))) {
-                    imgQueue.shift().questao = q.numero;
+        } else if (questoesComImg.length < images.length) {
+            // Mais imagens que questões com ref → distribuir proporcionalmente
+            const imgsPorQuestao = Math.ceil(images.length / questoesComImg.length);
+            let idx = 0;
+            for (const q of questoesComImg) {
+                const count = Math.min(imgsPorQuestao, images.length - idx);
+                for (let i = 0; i < count; i++) {
+                    if (idx < images.length) {
+                        images[idx].questao = q.numero;
+                        idx++;
+                    }
                 }
             }
-            // Restantes → última questão com hint, ou última questão
-            const fallback = questoesTexto.length > 0 ? questoesTexto[questoesTexto.length - 1].numero : null;
-            imgQueue.forEach(img => { img.questao = fallback; });
+            // Sobrou alguma? Dar para a última com ref
+            while (idx < images.length) {
+                images[idx].questao = questoesComImg[questoesComImg.length - 1].numero;
+                idx++;
+            }
+        } else {
+            // Mais questões com ref que imagens → dar 1 imagem para as primeiras N questões
+            for (let i = 0; i < images.length; i++) {
+                images[i].questao = questoesComImg[i].numero;
+            }
         }
     }
 }

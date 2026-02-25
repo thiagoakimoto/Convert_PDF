@@ -136,12 +136,9 @@ class PDFExtractor {
             const page = await pdfDoc.getPage(pageNum);
             const textContent = await page.getTextContent();
             
-            // Extrair texto mantendo a estrutura + detectar posições de questões
+            // Extrair texto mantendo a estrutura
             let pageText = '';
             let lastY = null;
-            const questionPositions = [];
-            let pendingQuestao = false;
-            let pendingY = null;
             
             for (const item of textContent.items) {
                 if (item.str) {
@@ -151,40 +148,13 @@ class PDFExtractor {
                     }
                     pageText += item.str;
                     lastY = item.transform[5];
-                    
-                    // Detectar cabeçalhos de questão: "QUESTÃO XX" (padrão estrito)
-                    if (pendingQuestao) {
-                        const numMatch = item.str.match(/^\s*(\d{1,3})/);
-                        if (numMatch) {
-                            const num = parseInt(numMatch[1]);
-                            if (num > 0 && num <= 200) {
-                                questionPositions.push({ numero: num, yPos: pendingY });
-                            }
-                        }
-                        pendingQuestao = false;
-                        pendingY = null;
-                    }
-                    
-                    // "QUESTÃO XX" completo num único item
-                    const qMatch = item.str.match(/Quest[ãa]o\s+(\d{1,3})/i);
-                    if (qMatch) {
-                        const num = parseInt(qMatch[1]);
-                        if (num > 0 && num <= 200) {
-                            questionPositions.push({ numero: num, yPos: item.transform[5] });
-                        }
-                    } else if (/Quest[ãa]o\s*$/i.test(item.str)) {
-                        // "QUESTÃO" sem número — número pode estar no próximo item
-                        pendingQuestao = true;
-                        pendingY = item.transform[5];
-                    }
                 }
             }
             
             pages.push({
                 pageNumber: pageNum,
                 text: pageText.trim(),
-                characterCount: pageText.trim().length,
-                questionPositions
+                characterCount: pageText.trim().length
             });
             
             fullText += pageText + '\n\n';
@@ -254,21 +224,6 @@ class PDFExtractor {
                             // Tentar obter a imagem
                             const imgData = await this.extractImageFromPage(page, imgName, pageNum, images.length + 1, maxWidth);
                             if (imgData) {
-                                // Extrair posição Y da imagem a partir do transform anterior (OPS.transform = 12)
-                                let imgYPos = null;
-                                for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
-                                    if (operatorList.fnArray[j] === 12) {
-                                        const args = operatorList.argsArray[j];
-                                        // args = [a, b, c, d, e, f] onde f = translateY
-                                        if (Array.isArray(args) && args.length >= 6) {
-                                            imgYPos = args[5];
-                                        } else if (Array.isArray(args) && args[0] && args[0].length >= 6) {
-                                            imgYPos = args[0][5];
-                                        }
-                                        break;
-                                    }
-                                }
-                                imgData.yPos = imgYPos;
                                 images.push(imgData);
                             }
                         } catch (imgError) {
