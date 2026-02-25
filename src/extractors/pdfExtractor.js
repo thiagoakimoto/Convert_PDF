@@ -88,7 +88,7 @@ class PDFExtractor {
                     pageNumber: page.pageNumber,
                     text: page.text,
                     images: pageImages,
-                    questionPositions: page.questionPositions || []
+                    questionRanges: page.questionRanges || []
                 };
             });
         
@@ -136,25 +136,60 @@ class PDFExtractor {
             const page = await pdfDoc.getPage(pageNum);
             const textContent = await page.getTextContent();
             
-            // Extrair texto mantendo a estrutura
+            // Extrair texto mantendo a estrutura + rastrear questões por range Y
             let pageText = '';
             let lastY = null;
+            const questionRanges = []; // { numero, yStart, yEnd, items: [] }
+            let currentQuestion = null;
             
             for (const item of textContent.items) {
                 if (item.str) {
+                    const itemY = item.transform[5];
+                    
                     // Detectar quebras de linha baseado na posição Y
-                    if (lastY !== null && Math.abs(lastY - item.transform[5]) > 5) {
+                    if (lastY !== null && Math.abs(lastY - itemY) > 5) {
                         pageText += '\n';
                     }
                     pageText += item.str;
-                    lastY = item.transform[5];
+                    lastY = itemY;
+                    
+                    // Detectar início de nova questão
+                    const qMatch = item.str.match(/Quest[ãa]o\s+(\d{1,3})/i);
+                    if (qMatch) {
+                        const num = parseInt(qMatch[1]);
+                        if (num > 0 && num <= 200) {
+                            // Fechar questão anterior registrando yEnd
+                            if (currentQuestion) {
+                                currentQuestion.yEnd = Math.min(...currentQuestion.items.map(i => i.y));
+                            }
+                            // Iniciar nova questão
+                            currentQuestion = { numero: num, items: [{ y: itemY }], yStart: itemY, yEnd: null };
+                            questionRanges.push(currentQuestion);
+                        }
+                    } else if (currentQuestion) {
+                        // Adicionar item Y à questão atual
+                        currentQuestion.items.push({ y: itemY });
+                    }
                 }
             }
+            
+            // Fechar última questão da página
+            if (currentQuestion && currentQuestion.items.length > 0) {
+                currentQuestion.yEnd = Math.min(...currentQuestion.items.map(i => i.y));
+            }
+            
+            // Limpar items (não precisa mais)
+            questionRanges.forEach(q => {
+                delete q.items;
+                // Se yEnd não foi definido, usar yStart - 100 como estimativa
+                if (q.yEnd === null) q.yEnd = q.yStart - 100;
+            });
             
             pages.push({
                 pageNumber: pageNum,
                 text: pageText.trim(),
-                characterCount: pageText.trim().length
+                characterCount: pageText.trim().length,
+                questionRanges // [{ numero, yStart, yEnd }]
             });
             
             fullText += pageText + '\n\n';
@@ -221,9 +256,24 @@ class PDFExtractor {
                         try {
                             const imgName = operatorList.argsArray[i][0];
                             
+                            // Extrair posição Y procurando o último transform antes da imagem
+                            let imgYPos = null;
+                            for (let j = i - 1; j >= Math.max(0, i - 15); j--) {
+                                if (operatorList.fnArray[j] === 12) { // OPS.transform
+                                    const args = operatorList.argsArray[j];
+                                    if (Array.isArray(args) && args.length >= 6) {
+                                        imgYPos = args[5]; // translateY
+                                    } else if (Array.isArray(args) && args[0] && args[0].length >= 6) {
+                                        imgYPos = args[0][5];
+                                    }
+                                    break;
+                                }
+                            }
+                            
                             // Tentar obter a imagem
                             const imgData = await this.extractImageFromPage(page, imgName, pageNum, images.length + 1, maxWidth);
                             if (imgData) {
+                                imgData.yPos = imgYPos; // Adicionar posição Y
                                 images.push(imgData);
                             }
                         } catch (imgError) {
