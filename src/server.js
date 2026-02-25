@@ -20,7 +20,27 @@ function tagImagensComQuestao(pages) {
         const images = page.images || [];
         if (images.length === 0) continue;
         
-        const questionRanges = page.questionRanges || [];
+        let questionRanges = page.questionRanges ||[];
+        
+        // FALLBACK: se questionRanges está vazio, detectar do texto
+        if (questionRanges.length === 0) {
+            const text = page.text || '';
+            const pattern = /Quest[ãa]o\s+(\d{1,3})/gi;
+            let match;
+            while ((match = pattern.exec(text)) !== null) {
+                const numero = parseInt(match[1]);
+                if (numero > 0 && numero <= 200) {
+                    questionRanges.push({ numero });
+                }
+            }
+            // Remover duplicatas
+            const seen = new Set();
+            questionRanges = questionRanges.filter(q => {
+                if (seen.has(q.numero)) return false;
+                seen.add(q.numero);
+                return true;
+            });
+        }
         
         // DEBUG: Log para página 8 (Q11 problema)
         if (page.pageNumber === 8) {
@@ -42,15 +62,16 @@ function tagImagensComQuestao(pages) {
             continue;
         }
         
-        // Múltiplas questões: matching por coordenada Y
+        // Múltiplas questões: matching por coordenada Y OU sequencial
         for (const img of images) {
             const imgY = img.yPos;
             
-            if (imgY == null) {
-                // Sem yPos → atribuir à primeira questão (fallback)
+            // Se não tem yPos OU ranges não têm Y → usar matching sequencial
+            if (imgY == null || !questionRanges[0].yMin) {
+                // Usar primeira questão por padrão
                 img.questao = questionRanges[0].numero;
                 if (page.pageNumber === 8) {
-                    console.log(`  ⚠️ Imagem sem yPos → atribuída a Q${questionRanges[0].numero}`);
+                    console.log(`  ⚠️ Sem coordenadas Y disponíveis → atribuída a Q${questionRanges[0].numero}`);
                 }
                 continue;
             }
@@ -59,7 +80,7 @@ function tagImagensComQuestao(pages) {
             // Em PDF: Y cresce de BAIXO para CIMA
             // yMin = parte inferior (menor Y)
             // yMax = parte superior (maior Y)
-            // Imagem está dentro se: yMin <= imgY <= yMax
+            //Imagem está dentro se: yMin <= imgY <= yMax
             let matched = false;
             for (const q of questionRanges) {
                 if (imgY >= q.yMin && imgY <= q.yMax) {
