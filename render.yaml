@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: pdf-extractor-api
+    env: node
+    buildCommand: |
+      apt-get update && apt-get install -y graphicsmagick ghostscript
+      npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: GEMINI_API_KEY
+        sync: false

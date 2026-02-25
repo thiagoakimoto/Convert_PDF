@@ -7,6 +7,20 @@ const { v4: uuidv4 } = require('uuid');
 const pdfExtractor = require('./extractors/pdfExtractor');
 const gabaritoExtractor = require('./extractors/gabaritoExtractor');
 const questionParser = require('./extractors/questionParser');
+const GeminiAnalyzer = require('./extractors/geminiAnalyzer');
+
+// Inicializar Gemini se API key disponível
+let geminiAnalyzer = null;
+if (process.env.GEMINI_API_KEY) {
+    try {
+        geminiAnalyzer = new GeminiAnalyzer(process.env.GEMINI_API_KEY);
+        console.log('✅ Gemini Vision inicializado com sucesso');
+    } catch (err) {
+        console.log('⚠️ Gemini não disponível:', err.message);
+    }
+} else {
+    console.log('⚠️ GEMINI_API_KEY não configurada - usando fallback local');
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -550,7 +564,32 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
         
         // 2. Adicionar campo "questao" em cada imagem
-        tagImagensComQuestao(result.pages);
+        // Usar Gemini Vision se disponível (100% assertivo)
+        if (geminiAnalyzer && provaFile) {
+            try {
+                console.log(`🤖 Usando Gemini Vision para tagging de imagens...`);
+                const mapeamento = await geminiAnalyzer.processarProvaCompleta(provaFile.path, result.pages);
+                geminiAnalyzer.aplicarMapeamento(result.pages, mapeamento);
+                
+                // Atualizar allImages também
+                if (result.allImages) {
+                    for (const img of result.allImages) {
+                        const mapping = mapeamento.get(img.id);
+                        if (mapping) {
+                            img.questao = mapping.questao;
+                            img.idioma = mapping.idioma;
+                        }
+                    }
+                }
+                console.log(`✅ Gemini: ${mapeamento.size} imagens mapeadas com sucesso`);
+            } catch (geminiError) {
+                console.error(`❌ Erro Gemini, usando fallback:`, geminiError.message);
+                tagImagensComQuestao(result.pages);
+            }
+        } else {
+            // Fallback: usar método local (menos preciso)
+            tagImagensComQuestao(result.pages);
+        }
         console.log(`🏷️ Imagens tagueadas com número da questão`);
         
         // Limpar campos internos de posição (não precisam ir na resposta)
