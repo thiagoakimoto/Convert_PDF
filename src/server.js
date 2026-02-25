@@ -12,96 +12,91 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 /**
- * Adiciona campo "questao" em cada imagem indicando a qual questão pertence.
- * Usa distribuição sequencial com análise de keywords para matching.
+ * Adiciona campo "questao" em cada imagem usando coordenadas Y.
+ * Regra: imagem pertence à questão cujo range Y (yMin-yMax) contém o yPos da imagem.
  */
 function tagImagensComQuestao(pages) {
-    // Keywords que indicam presença de imagem
-    const IMG_KEYWORDS = /imagem|figura|observ[ea]|analis[ea]|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|foto|reprodu[çcz]|cena|obra|pintura|dispon[ií]vel\s+em|adaptado|charge|cartaz|infogr[aá]f|esquema|diagrama|planta|desenho|retrato|arte|exposi[çc][aã]o|fonte:/i;
-    
     for (const page of pages) {
-        const text = page.text || '';
         const images = page.images || [];
         if (images.length === 0) continue;
         
-        // Detectar questões com regex ESTRITA
-        const pattern = /Quest[ãa]o\s+(\d{1,3})/gi;
-        const questoes = [];
-        let match;
+        const questionRanges = page.questionRanges || [];
         
-        while ((match = pattern.exec(text)) !== null) {
-            const numero = parseInt(match[1]);
-            if (numero > 0 && numero <= 200) {
-                questoes.push({ numero, startIndex: match.index });
-            }
+        // DEBUG: Log para página 8 (Q11 problema)
+        if (page.pageNumber === 8) {
+            console.log(`\n=== DEBUG PÁGINA 8 ===`);
+            console.log(`Questões detectadas:`, questionRanges.map(q => `Q${q.numero} (Y: ${q.yMin}-${q.yMax})`));
+            console.log(`Imagens encontradas:`, images.length);
+            images.forEach((img, i) => console.log(`  img[${i}]: yPos=${img.yPos}`));
         }
         
-        // Remover duplicatas (mesmo número aparece 2x)
-        const uniqueQuestoes = [];
-        const seen = new Set();
-        for (const q of questoes) {
-            if (!seen.has(q.numero)) {
-                uniqueQuestoes.push(q);
-                seen.add(q.numero);
-            }
-        }
-        
-        if (uniqueQuestoes.length === 0) {
-            // Sem questão detectada → null
+        // Sem questões → null
+        if (questionRanges.length === 0) {
             images.forEach(img => { img.questao = null; });
             continue;
         }
         
-        if (uniqueQuestoes.length === 1) {
-            // Única questão → todas as imagens são dela
-            images.forEach(img => { img.questao = uniqueQuestoes[0].numero; });
+        // Única questão → todas pertencem a ela
+        if (questionRanges.length === 1) {
+            images.forEach(img => { img.questao = questionRanges[0].numero; });
             continue;
         }
         
-        // Múltiplas questões → extrair texto de cada uma
-        const questoesComTexto = uniqueQuestoes.map((q, i) => {
-            const start = q.startIndex;
-            const end = i + 1 < uniqueQuestoes.length ? uniqueQuestoes[i + 1].startIndex : text.length;
-            const textoQuestao = text.substring(start, end);
-            const temReferencia = IMG_KEYWORDS.test(textoQuestao);
-            return { numero: q.numero, texto: textoQuestao, temReferencia, startIndex: start };
-        });
-        
-        // Distribuir imagens para questões com referência
-        const questoesComImg = questoesComTexto.filter(q => q.temReferencia);
-        
-        if (questoesComImg.length === 0) {
-            // Nenhuma tem referência → distribuir sequencialmente para TODAS
-            for (let i = 0; i < images.length; i++) {
-                const idx = i % questoesComTexto.length;
-                images[i].questao = questoesComTexto[idx].numero;
-            }
-        } else if (images.length === 1) {
-            // 1 imagem → dar para a PRIMEIRA questão com referência
-            images[0].questao = questoesComImg[0].numero;
-        } else if (questoesComImg.length === images.length) {
-            // Perfeito match → 1:1 sequencial
-            for (let i = 0; i < images.length; i++) {
-                images[i].questao = questoesComImg[i].numero;
-            }
-        } else {
-            // Distribuir proporcionalmente entre questões com referência
-            const imgsPorQuestao = images.length / questoesComImg.length;
-            let imgIdx = 0;
+        // Múltiplas questões: matching por coordenada Y
+        for (const img of images) {
+            const imgY = img.yPos;
             
-            for (let qIdx = 0; qIdx < questoesComImg.length; qIdx++) {
-                const count = Math.round(imgsPorQuestao * (qIdx + 1)) - Math.round(imgsPorQuestao * qIdx);
-                for (let i = 0; i < count && imgIdx < images.length; i++) {
-                    images[imgIdx].questao = questoesComImg[qIdx].numero;
-                    imgIdx++;
+            if (imgY == null) {
+                // Sem yPos → atribuir à primeira questão (fallback)
+                img.questao = questionRanges[0].numero;
+                if (page.pageNumber === 8) {
+                    console.log(`  ⚠️ Imagem sem yPos → atribuída a Q${questionRanges[0].numero}`);
+                }
+                continue;
+            }
+            
+            // Encontrar questão cujo range contém imgY
+            // Em PDF: Y cresce de BAIXO para CIMA
+            // yMin = parte inferior (menor Y)
+            // yMax = parte superior (maior Y)
+            // Imagem está dentro se: yMin <= imgY <= yMax
+            let matched = false;
+            for (const q of questionRanges) {
+                if (imgY >= q.yMin && imgY <= q.yMax) {
+                    img.questao = q.numero;
+                    matched = true;
+                    if (page.pageNumber === 8) {
+                        console.log(`  ✓ Imagem Y=${imgY} → Q${q.numero} (range: ${q.yMin}-${q.yMax})`);
+                    }
+                    break;
                 }
             }
             
-            // Sobrou alguma? Dar para a última com referência
-            while (imgIdx < images.length) {
-                images[imgIdx].questao = questoesComImg[questoesComImg.length - 1].numero;
-                imgIdx++;
+            // Não achou match → questão mais próxima
+            if (!matched) {
+                let closestQ = questionRanges[0];
+                let minDist = Infinity;
+                
+                for (const q of questionRanges) {
+                    // Distância ao range (0 se dentro, >0 se fora)
+                    const dist = imgY < q.yMin ? (q.yMin - imgY) : (imgY > q.yMax ? (imgY - q.yMax) : 0);
+                    
+                    if (dist < minDist) {
+                        minDist = dist;
+                        closestQ = q;
+                    }
+                }
+                
+                img.questao = closestQ.numero;
+                if (page.pageNumber === 8) {
+                    console.log(`  ⚠️ Imagem Y=${imgY} fora de ranges → Q${closestQ.numero} mais próxima (dist=${minDist})`);
+                }
             }
+        }
+        
+        if (page.pageNumber === 8) {
+            console.log(`Resultado final:`, images.map((img, i) => `img[${i}]→Q${img.questao}`));
+            console.log(`=== FIM DEBUG ===\n`);
         }
     }
 }
