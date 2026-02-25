@@ -13,72 +13,115 @@ const PORT = process.env.PORT || 3000;
 
 /**
  * Adiciona campo "questao" em cada imagem indicando a qual questão pertence.
- * Simples: detecta questões na página, distribui imagens por ordem.
+ * Usa posição Y (coordenadas do PDF) para matching espacial preciso.
+ * Fallback para detecção estrita "QUESTÃO XX" quando posições não disponíveis.
  */
 function tagImagensComQuestao(pages) {
-    const IMG_KEYWORDS = /imagem|figura|observe|analise|gr[aá]fico|tabela|quadro|mapa|ilustra|retratad|seguir|foto|reprodu[çcz]|cena|obra|pintura/i;
-    
     for (const page of pages) {
-        const text = page.text || '';
         const images = page.images || [];
         if (images.length === 0) continue;
         
-        // Detectar questões na página
-        const pattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
-        const bounds = [];
-        let match;
+        // Usar questionPositions do extrator (padrão estrito QUESTÃO XX + coord Y)
+        let qPositions = page.questionPositions || [];
         
-        while ((match = pattern.exec(text)) !== null) {
-            const numero = parseInt(match[1]);
-            if (numero > 0 && numero <= 200) {
-                if (bounds.length === 0 || bounds[bounds.length - 1].numero !== numero) {
-                    bounds.push({ numero, index: match.index });
+        // Fallback: detectar do texto com padrão estrito (sem Y)
+        if (qPositions.length === 0) {
+            const pattern = /Quest[ãa]o\s+(\d{1,3})/gi;
+            let match;
+            while ((match = pattern.exec(page.text || '')) !== null) {
+                const numero = parseInt(match[1]);
+                if (numero > 0 && numero <= 200) {
+                    qPositions.push({ numero, yPos: null });
                 }
             }
         }
         
-        if (bounds.length === 0) {
-            // Sem questão detectada — marcar imagens como página
+        // Deduplicar (mesmo número pode aparecer 2x se capturado nos dois caminhos)
+        const seen = new Set();
+        qPositions = qPositions.filter(q => {
+            if (seen.has(q.numero)) return false;
+            seen.add(q.numero);
+            return true;
+        });
+        
+        if (qPositions.length === 0) {
             images.forEach(img => { img.questao = null; });
             continue;
         }
         
-        if (bounds.length === 1) {
-            // Única questão → todas as imagens são dela
-            images.forEach(img => { img.questao = bounds[0].numero; });
+        if (qPositions.length === 1) {
+            images.forEach(img => { img.questao = qPositions[0].numero; });
             continue;
         }
         
-        // Múltiplas questões → pegar o texto de cada uma e ver quem referencia imagem
-        const questoesTexto = bounds.map((b, i) => {
-            const start = b.index;
-            const end = i + 1 < bounds.length ? bounds[i + 1].index : text.length;
-            return { numero: b.numero, texto: text.substring(start, end) };
-        });
+        // Verificar se temos dados de posição Y disponíveis
+        const temPosicaoY = qPositions.some(q => q.yPos != null) && images.some(i => i.yPos != null);
         
-        // Distribuir imagens na ordem para quem referencia
-        const imgQueue = [...images];
-        const assigned = new Set();
-        
-        for (const q of questoesTexto) {
-            if (imgQueue.length === 0) break;
-            if (IMG_KEYWORDS.test(q.texto)) {
-                const img = imgQueue.shift();
-                img.questao = q.numero;
-                assigned.add(img);
+        if (temPosicaoY) {
+            // === MATCHING POR POSIÇÃO Y (preciso) ===
+            // Em coordenadas PDF: Y cresce de baixo pra cima
+            // Questão com yPos maior está mais acima na página
+            // Ordenar questões por Y decrescente (topo → base)
+            const sortedQ = [...qPositions].filter(q => q.yPos != null).sort((a, b) => b.yPos - a.yPos);
+            
+            if (sortedQ.length === 0) {
+                // Sem Y válido, usar primeira questão
+                images.forEach(img => { img.questao = qPositions[0].numero; });
+                continue;
             }
+            
+            for (const img of images) {
+                const imgY = img.yPos;
+                
+                if (imgY == null) {
+                    // Sem posição — atribuir à última questão da página
+                    img.questao = sortedQ[sortedQ.length - 1].numero;
+                    continue;
+                }
+                
+                // Encontrar a questão cujo cabeçalho está logo ACIMA da imagem
+                // Iterar de cima pra baixo; a última questão com yPos >= imgY é a correta
+                let bestQuestion = sortedQ[0]; // default: questão mais acima
+                for (const q of sortedQ) {
+                    if (q.yPos >= imgY - 30) { // 30 unidades de tolerância (~0.4 cm)
+                        bestQuestion = q;
+                    }
+                }
+                
+                img.questao = bestQuestion.numero;
+            }
+        } else {
+            // === FALLBACK SEM POSIÇÃO Y ===
+            // Usar ordem de aparição no texto + heurísticas simples
+            // Detectar limites de cada questão no texto
+            const text = page.text || '';
+            const questoesTexto = [];
+            for (let i = 0; i < qPositions.length; i++) {
+                const q = qPositions[i];
+                const re = new RegExp('Quest[ãa]o\\s+' + q.numero + '\\b', 'i');
+                const m = re.exec(text);
+                const startIdx = m ? m.index : 0;
+                const endIdx = i + 1 < qPositions.length
+                    ? (() => { const re2 = new RegExp('Quest[ãa]o\\s+' + qPositions[i+1].numero + '\\b', 'i'); const m2 = re2.exec(text); return m2 ? m2.index : text.length; })()
+                    : text.length;
+                questoesTexto.push({ numero: q.numero, texto: text.substring(startIdx, endIdx) });
+            }
+            
+            // Se apenas 1 imagem, atribuir à primeira questão que começa com referência (Disponível em, etc.)
+            // ou à primeira questão se nenhuma tem referência
+            const IMG_HINTS = /dispon[ií]vel\s+em|adaptado|(?:^Quest[ãa]o\s+\d+\s*\n\s*(?:[A-Z][^a-z]{0,30}\n))/i;
+            
+            const imgQueue = [...images];
+            for (const q of questoesTexto) {
+                if (imgQueue.length === 0) break;
+                if (IMG_HINTS.test(q.texto.substring(0, 200))) {
+                    imgQueue.shift().questao = q.numero;
+                }
+            }
+            // Restantes → última questão com hint, ou última questão
+            const fallback = questoesTexto.length > 0 ? questoesTexto[questoesTexto.length - 1].numero : null;
+            imgQueue.forEach(img => { img.questao = fallback; });
         }
-        
-        // Imagens não atribuídas → dar pra última questão com referência, ou última questão
-        const lastQComRef = [...questoesTexto].reverse().find(q => IMG_KEYWORDS.test(q.texto));
-        const fallbackNumero = lastQComRef ? lastQComRef.numero : bounds[bounds.length - 1].numero;
-        
-        for (const img of imgQueue) {
-            img.questao = fallbackNumero;
-        }
-        
-        // Marcar as que não foram tocadas
-        images.filter(img => img.questao === undefined).forEach(img => { img.questao = fallbackNumero; });
     }
 }
 
@@ -565,7 +608,8 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 text: page.text,
                 characterCount: page.characterCount,
                 images: pageImages,
-                imageCount: pageImages.length
+                imageCount: pageImages.length,
+                questionPositions: page.questionPositions || []
             };
         });
         
@@ -592,6 +636,19 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         // 2. Adicionar campo "questao" em cada imagem
         tagImagensComQuestao(result.pages);
         console.log(`🏷️ Imagens tagueadas com número da questão`);
+        
+        // Limpar campos internos de posição (não precisam ir na resposta)
+        for (const page of result.pages) {
+            delete page.questionPositions;
+            for (const img of page.images || []) {
+                delete img.yPos;
+            }
+        }
+        if (result.allImages) {
+            for (const img of result.allImages) {
+                delete img.yPos;
+            }
+        }
         
         // 3. Processar gabarito
         let gabarito_data = {};
