@@ -25,7 +25,7 @@ class GeminiAnalyzer {
      * @param {string}   pageText   - Texto extraído da página (contém "QUESTÃO 12", etc.)
      * @param {Array}    imagens    - Array de { id, dataUrl, mimeType } em ordem de cima p/ baixo
      * @param {number}   pageNumber - Número da página (para logs)
-     * @returns {Promise<Object>}   - { mapeamento: [{nome_imagem, numero_questao, idioma}] }
+     * @returns {Promise<Object>}   - { mapeamento: [{imagem, questao, idioma, local}] }
      */
     async analisarPagina(pageText, imagens, pageNumber) {
         if (!imagens || imagens.length === 0) {
@@ -62,7 +62,8 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
    - O texto de apoio (o enunciado menciona "observe a imagem", "na charge", etc.?)
    - O conteúdo visual da própria imagem (gráfico de qual tema? charge sobre o que?)
 3. QUESTÕES 1-5 do ENEM podem ser de Inglês ou Espanhol: se for o caso, preencha "idioma".
-4. LIXO VISUAL: logotipos, ícones, códigos de barra → "numero_questao": null.
+4. ALTERNATIVAS COM IMAGENS: Algumas questões possuem imagens nas alternativas (A, B, C, D, E) em vez de texto. Indique exatamente onde a imagem está localizada usando o campo "local". O campo "local" deve ser preenchido como "enunciado", "alternativa_a", "alternativa_b", "alternativa_c", "alternativa_d" ou "alternativa_e".
+5. LIXO VISUAL: logotipos, ícones, códigos de barra → "questao": null, "local": null.
 </instrucoes>
 
 <limitacoes>
@@ -73,8 +74,10 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 <saida>
 {
   "mapeamento": [
-    { "nome_imagem": "img_8_1", "numero_questao": 12, "idioma": null },
-    { "nome_imagem": "img_8_2", "numero_questao": 13, "idioma": null }
+    { "imagem": "img_8_1", "questao": 12, "idioma": null, "local": "enunciado" },
+    { "imagem": "img_8_2", "questao": 12, "idioma": null, "local": "alternativa_a" },
+    { "imagem": "img_8_3", "questao": 12, "idioma": null, "local": "alternativa_b" },
+    { "imagem": "img_8_4", "questao": 13, "idioma": null, "local": "enunciado" }
   ]
 }
 </saida>`;
@@ -134,9 +137,10 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
             // Fallback: retornar mapeamento com questao=null para não travar o fluxo
             return {
                 mapeamento: imagens.map(img => ({
-                    nome_imagem: img.id,
-                    numero_questao: null,
+                    imagem: img.id,
+                    questao: null,
                     idioma: null,
+                    local: null,
                     erro: error.message
                 }))
             };
@@ -164,9 +168,10 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 
                 if (resultado.mapeamento) {
                     for (const item of resultado.mapeamento) {
-                        mapeamentoGlobal.set(item.nome_imagem, {
-                            questao: item.numero_questao,
-                            idioma: item.idioma ?? null
+                        mapeamentoGlobal.set(item.imagem, {
+                            questao: item.questao ?? null,
+                            idioma: item.idioma ?? null,
+                            local: item.local ?? null
                         });
                     }
                 }
@@ -185,7 +190,7 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
     /**
      * Aplica o mapeamento retornado pelo Gemini nas imagens extraídas.
      * @param {Array} pages      - Array de páginas com imagens
-     * @param {Map}   mapeamento - Map: nome_imagem → { questao, idioma }
+     * @param {Map}   mapeamento - Map: nome_imagem → { questao, idioma, local }
      */
     aplicarMapeamento(pages, mapeamento) {
         for (const page of pages) {
@@ -194,6 +199,7 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
                 const mapping = mapeamento.get(img.id);
                 img.questao = mapping ? mapping.questao : null;
                 img.idioma  = mapping ? mapping.idioma  : null;
+                img.local   = mapping ? mapping.local   : null;
             }
         }
     }

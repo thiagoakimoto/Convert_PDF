@@ -578,6 +578,7 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                         if (mapping) {
                             img.questao = mapping.questao;
                             img.idioma = mapping.idioma;
+                            img.local = mapping.local;
                         }
                     }
                 }
