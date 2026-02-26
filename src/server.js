@@ -568,7 +568,7 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
         if (geminiAnalyzer && provaFile) {
             try {
                 console.log(`🤖 Usando Gemini Vision para tagging de imagens...`);
-                const mapeamento = await geminiAnalyzer.processarProvaCompleta(provaFile.path, result.pages);
+                const mapeamento = await geminiAnalyzer.processarProvaCompleta(result.pages);
                 geminiAnalyzer.aplicarMapeamento(result.pages, mapeamento);
                 
                 // Atualizar allImages também

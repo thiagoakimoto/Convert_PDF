@@ -1,12 +1,13 @@
 /**
  * Gemini Vision Analyzer
- * Usa a API do Gemini para analisar visualmente páginas de prova
- * e mapear imagens às suas respectivas questões com 100% de precisão
+ * Usa a API do Gemini para analisar visualmente imagens extraídas de provas
+ * e mapear cada imagem à sua respectiva questão com alta precisão.
+ *
+ * ESTRATÉGIA: envia o texto da página + as imagens recortadas diretamente ao Gemini.
+ * Isso elimina a dependência de pdf-to-img / canvas nativo (problemático no Render).
  */
 
 const { GoogleGenAI } = require('@google/genai');
-const fs = require('fs');
-const path = require('path');
 
 class GeminiAnalyzer {
     constructor(apiKey) {
@@ -14,121 +15,95 @@ class GeminiAnalyzer {
             throw new Error('GEMINI_API_KEY não configurada');
         }
         this.ai = new GoogleGenAI({ apiKey });
-        this.model = 'gemini-2.0-flash'; // Mais rápido e barato
+        this.model = 'gemini-2.0-flash';
     }
 
     /**
-     * Converte uma página específica do PDF em imagem PNG base64
-     * Usa pdf-to-img que é baseada em pdfjs (sem dependências nativas)
-     * @param {string} pdfPath - Caminho do arquivo PDF
-     * @param {number} pageNumber - Número da página (1-indexed)
-     * @returns {Promise<string>} - Imagem em base64 (sem prefixo data:)
+     * Analisa uma página da prova usando Gemini Vision.
+     * Recebe o texto extraído da página + as imagens já recortadas pelo pdfExtractor.
+     *
+     * @param {string}   pageText   - Texto extraído da página (contém "QUESTÃO 12", etc.)
+     * @param {Array}    imagens    - Array de { id, dataUrl, mimeType } em ordem de cima p/ baixo
+     * @param {number}   pageNumber - Número da página (para logs)
+     * @returns {Promise<Object>}   - { mapeamento: [{nome_imagem, numero_questao, idioma}] }
      */
-    async pdfPageToImage(pdfPath, pageNumber) {
-        // Importar dinamicamente (ES module)
-        const { pdf } = await import('pdf-to-img');
-        
-        const pdfBuffer = fs.readFileSync(pdfPath);
-        
-        let currentPage = 0;
-        for await (const image of pdf(pdfBuffer, { scale: 2.0 })) {
-            currentPage++;
-            if (currentPage === pageNumber) {
-                // image é um Buffer PNG
-                return image.toString('base64');
-            }
+    async analisarPagina(pageText, imagens, pageNumber) {
+        if (!imagens || imagens.length === 0) {
+            return { mapeamento: [] };
         }
-        
-        throw new Error(`Página ${pageNumber} não encontrada no PDF`);
-    }
 
-    /**
-     * Analisa uma página da prova usando Gemini Vision
-     * @param {string} pageImageBase64 - Imagem da página em base64
-     * @param {string[]} nomesDasImagens - Lista de nomes das imagens recortadas na ordem
-     * @param {number} pageNumber - Número da página (para debug)
-     * @returns {Promise<Object>} - Mapeamento de imagens para questões
-     */
-    async analisarPagina(pageImageBase64, nomesDasImagens, pageNumber) {
+        // Lista numerada para o prompt (ex: "Imagem 1: img_8_1")
+        const listaImagensTexto = imagens
+            .map((img, i) => `  - Imagem ${i + 1}: "${img.id}"`)
+            .join('\n');
+
         const prompt = `<objetivo>
-Você atua como um Especialista em Visão Computacional e Processamento de Dados de Concursos.
-Sua missão é analisar visualmente a imagem de uma página de prova do ENEM e mapear corretamente as imagens gráficas (charges, gráficos, tabelas) recortadas previamente pelo nosso sistema às suas respectivas questões.
+Você é um especialista em análise de provas de concurso (ENEM, OAB, FGV, CESPE).
+Sua missão é mapear cada imagem recortada à questão correta desta página de prova.
 </objetivo>
 
 <contexto>
-1. Imagem da Página: Fornecida em anexo (inlineData).
-2. Imagens Recortadas: O nosso sistema já recortou as imagens desta página. Os nomes dos arquivos, listados na ordem exata em que aparecem de cima para baixo no layout, são:
-${JSON.stringify(nomesDasImagens)}
+TEXTO COMPLETO DA PÁGINA ${pageNumber}:
+---
+${pageText}
+---
+
+IMAGENS RECORTADAS desta página (na ordem de cima para baixo, conforme aparecem no PDF):
+${listaImagensTexto}
+
+As imagens estão anexadas a esta mensagem na mesma ordem numérica acima.
+Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diante.
 </contexto>
 
 <instrucoes>
-1. ANÁLISE ESPACIAL E TEXTUAL:
-   - Leia a página inteira visualmente, identificando os blocos de cada questão (ex: "QUESTÃO 12").
-   - Identifique se o bloco da questão possui uma imagem gráfica renderizada logo abaixo do texto de apoio ou se o enunciado faz referência direta a uma figura ("Observe a imagem", "Na charge").
-
-2. MAPEAMENTO:
-   - Atribua o nome do arquivo da imagem correspondente à questão correta.
-   - Siga a ordem: a primeira imagem visualizada na página corresponde ao primeiro nome da lista de "Imagens Recortadas", e assim por diante.
-
-3. TRATAMENTO DO INGLÊS/ESPANHOL (REGRA DO ENEM):
-   - O ENEM repete a numeração das questões de 1 a 5 (Inglês e Espanhol).
-   - Se a imagem pertencer a uma questão entre 1 e 5, você DEVE preencher o campo "idioma" no JSON indicando a qual prova ela pertence, lendo o cabeçalho acima dela.
-   - Se for da questão 6 em diante, o campo "idioma" deve ser null.
-
-4. LIXO VISUAL:
-   - Se houver nomes na lista de imagens que parecem ser apenas logotipos, ícones de cadernos ou códigos de barras (não pertencem a nenhuma questão), atribua o valor "numero_questao": null para eles.
+1. LEIA o texto da página para identificar os blocos de cada questão ("QUESTÃO 11", "QUESTÃO 12", etc.).
+2. OBSERVE cada imagem anexada e identifique a qual questão ela pertence, usando:
+   - A ordem visual (a imagem aparece logo abaixo do enunciado de qual questão?)
+   - O texto de apoio (o enunciado menciona "observe a imagem", "na charge", etc.?)
+   - O conteúdo visual da própria imagem (gráfico de qual tema? charge sobre o que?)
+3. QUESTÕES 1-5 do ENEM podem ser de Inglês ou Espanhol: se for o caso, preencha "idioma".
+4. LIXO VISUAL: logotipos, ícones, códigos de barra → "numero_questao": null.
 </instrucoes>
 
 <limitacoes>
-- NUNCA invente nomes de imagens que não estão na lista fornecida.
-- NUNCA tente resolver a questão.
-- A saída deve ser EXCLUSIVAMENTE um bloco JSON válido, sem textos introdutórios ou marcações Markdown (sem \`\`\`json).
+- Use SOMENTE os nomes de imagem da lista acima. Nunca invente nomes.
+- Retorne APENAS um bloco JSON válido, sem texto adicional e sem markdown.
 </limitacoes>
 
 <saida>
-Retorne APENAS um JSON com a seguinte estrutura:
 {
   "mapeamento": [
-    {
-      "nome_imagem": "img_8_1",
-      "numero_questao": 4,
-      "idioma": "Espanhol" 
-    },
-    {
-      "nome_imagem": "img_8_2",
-      "numero_questao": 14,
-      "idioma": null
-    },
-    {
-      "nome_imagem": "img_8_3",
-      "numero_questao": null,
-      "idioma": null
-    }
+    { "nome_imagem": "img_8_1", "numero_questao": 12, "idioma": null },
+    { "nome_imagem": "img_8_2", "numero_questao": 13, "idioma": null }
   ]
 }
 </saida>`;
 
+        // Montar parts: primeiro as imagens (na ordem), depois o prompt
+        const parts = [];
+
+        for (const img of imagens) {
+            // dataUrl formato: "data:image/jpeg;base64,XXXXX"
+            const commaIdx = img.dataUrl.indexOf(',');
+            if (commaIdx === -1) continue;
+
+            const header  = img.dataUrl.substring(0, commaIdx);   // "data:image/jpeg;base64"
+            const base64  = img.dataUrl.substring(commaIdx + 1);  // os bytes
+            const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/jpeg';
+
+            parts.push({
+                inlineData: { mimeType, data: base64 }
+            });
+        }
+
+        parts.push({ text: prompt });
+
         try {
-            console.log(`🔍 Gemini analisando página ${pageNumber} (${nomesDasImagens.length} imagens)...`);
-            
+            console.log(`🔍 Gemini analisando página ${pageNumber} (${imagens.length} imagem(ns))...`);
+
             const response = await this.ai.models.generateContent({
                 model: this.model,
-                contents: [
-                    {
-                        role: 'user',
-                        parts: [
-                            {
-                                inlineData: {
-                                    mimeType: 'image/png',
-                                    data: pageImageBase64
-                                }
-                            },
-                            {
-                                text: prompt
-                            }
-                        ]
-                    }
-                ],
+                contents: [{ role: 'user', parts }],
                 config: {
                     responseMimeType: 'application/json',
                     temperature: 0.1
@@ -136,32 +111,30 @@ Retorne APENAS um JSON com a seguinte estrutura:
             });
 
             const responseText = response.text;
-            
-            // Parsear JSON da resposta
+
             let resultado;
             try {
                 resultado = JSON.parse(responseText);
-            } catch (parseError) {
-                // Tentar extrair JSON de markdown se necessário
+            } catch {
+                // Fallback: extrair bloco JSON de dentro de markdown, se vier
                 const jsonMatch = responseText.match(/\{[\s\S]*\}/);
                 if (jsonMatch) {
                     resultado = JSON.parse(jsonMatch[0]);
                 } else {
-                    throw new Error(`Resposta inválida do Gemini: ${responseText.substring(0, 200)}`);
+                    throw new Error(`Resposta não é JSON: ${responseText.substring(0, 300)}`);
                 }
             }
 
-            console.log(`✅ Página ${pageNumber}: ${resultado.mapeamento?.length || 0} mapeamentos`);
-            
+            console.log(`✅ Página ${pageNumber}: ${resultado.mapeamento?.length || 0} mapeamento(s)`);
             return resultado;
 
         } catch (error) {
             console.error(`❌ Erro Gemini página ${pageNumber}:`, error.message);
-            
-            // Fallback: retornar mapeamento vazio
+
+            // Fallback: retornar mapeamento com questao=null para não travar o fluxo
             return {
-                mapeamento: nomesDasImagens.map(nome => ({
-                    nome_imagem: nome,
+                mapeamento: imagens.map(img => ({
+                    nome_imagem: img.id,
                     numero_questao: null,
                     idioma: null,
                     erro: error.message
@@ -171,73 +144,56 @@ Retorne APENAS um JSON com a seguinte estrutura:
     }
 
     /**
-     * Processa todas as páginas de uma prova e retorna mapeamento completo
-     * @param {string} pdfPath - Caminho do PDF
-     * @param {Object} pagesData - Dados das páginas com imagens extraídas
-     * @returns {Promise<Map>} - Map de nome_imagem → {questao, idioma}
+     * Processa todas as páginas de uma prova e retorna mapeamento global.
+     * Não precisa mais do caminho do PDF — usa apenas os dados já extraídos.
+     *
+     * @param {Array} pagesData - Array de { pageNumber, text, images: [{id, dataUrl, mimeType}] }
+     * @returns {Promise<Map>}  - Map: nome_imagem → { questao, idioma }
      */
-    async processarProvaCompleta(pdfPath, pagesData) {
+    async processarProvaCompleta(pagesData) {
         const mapeamentoGlobal = new Map();
-        
-        console.log(`\n🚀 Iniciando análise Gemini de ${pagesData.length} páginas...\n`);
-        
-        for (const page of pagesData) {
-            const { pageNumber, images } = page;
-            
-            // Pular páginas sem imagens
-            if (!images || images.length === 0) continue;
-            
-            // Lista de nomes das imagens na ordem
-            const nomesDasImagens = images.map(img => img.id);
-            
+        const paginasComImagens = pagesData.filter(p => p.images && p.images.length > 0);
+
+        console.log(`\n🚀 Gemini: analisando ${paginasComImagens.length} página(s) com imagem(ns)...\n`);
+
+        for (const page of paginasComImagens) {
+            const { pageNumber, text, images } = page;
+
             try {
-                // Converter página para imagem
-                const pageImageBase64 = await this.pdfPageToImage(pdfPath, pageNumber);
-                
-                // Analisar com Gemini
-                const resultado = await this.analisarPagina(pageImageBase64, nomesDasImagens, pageNumber);
-                
-                // Adicionar ao mapeamento global
+                const resultado = await this.analisarPagina(text || '', images, pageNumber);
+
                 if (resultado.mapeamento) {
                     for (const item of resultado.mapeamento) {
                         mapeamentoGlobal.set(item.nome_imagem, {
                             questao: item.numero_questao,
-                            idioma: item.idioma
+                            idioma: item.idioma ?? null
                         });
                     }
                 }
-                
-                // Rate limiting: 60 req/min = 1 req/segundo
-                await this.sleep(1000);
-                
             } catch (error) {
                 console.error(`Erro ao processar página ${pageNumber}:`, error.message);
             }
+
+            // Rate limit: ~1 req/s (60 RPM — adequado para plano pago do Gemini)
+            await this.sleep(1000);
         }
-        
-        console.log(`\n✅ Análise completa: ${mapeamentoGlobal.size} imagens mapeadas\n`);
-        
+
+        console.log(`\n✅ Gemini concluído: ${mapeamentoGlobal.size} imagem(ns) mapeada(s)\n`);
         return mapeamentoGlobal;
     }
 
     /**
-     * Aplica o mapeamento do Gemini nas imagens extraídas
-     * @param {Array} pages - Array de páginas com imagens
-     * @param {Map} mapeamento - Mapeamento nome_imagem → {questao, idioma}
+     * Aplica o mapeamento retornado pelo Gemini nas imagens extraídas.
+     * @param {Array} pages      - Array de páginas com imagens
+     * @param {Map}   mapeamento - Map: nome_imagem → { questao, idioma }
      */
     aplicarMapeamento(pages, mapeamento) {
         for (const page of pages) {
             if (!page.images) continue;
-            
             for (const img of page.images) {
                 const mapping = mapeamento.get(img.id);
-                if (mapping) {
-                    img.questao = mapping.questao;
-                    img.idioma = mapping.idioma;
-                } else {
-                    img.questao = null;
-                    img.idioma = null;
-                }
+                img.questao = mapping ? mapping.questao : null;
+                img.idioma  = mapping ? mapping.idioma  : null;
             }
         }
     }
