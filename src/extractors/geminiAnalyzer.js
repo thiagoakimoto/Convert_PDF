@@ -25,7 +25,7 @@ class GeminiAnalyzer {
      * @param {string}   pageText   - Texto extraído da página (contém "QUESTÃO 12", etc.)
      * @param {Array}    imagens    - Array de { id, dataUrl, mimeType } em ordem de cima p/ baixo
      * @param {number}   pageNumber - Número da página (para logs)
-     * @returns {Promise<Object>}   - { mapeamento: [{imagem, questao, idioma, local}] }
+     * @returns {Promise<Object>}   - { texto_anotado, mapeamento: [{imagem, questao, idioma, local}] }
      */
     async analisarPagina(pageText, imagens, pageNumber) {
         if (!imagens || imagens.length === 0) {
@@ -64,6 +64,7 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 3. QUESTÕES 1-5 do ENEM podem ser de Inglês ou Espanhol: se for o caso, preencha "idioma".
 4. ALTERNATIVAS COM IMAGENS: Algumas questões possuem imagens nas alternativas (A, B, C, D, E) em vez de texto. Indique exatamente onde a imagem está localizada usando o campo "local". O campo "local" deve ser preenchido como "enunciado", "alternativa_a", "alternativa_b", "alternativa_c", "alternativa_d" ou "alternativa_e".
 5. LIXO VISUAL: logotipos, ícones, códigos de barra → "questao": null, "local": null.
+6. REGRAS RIGOROSAS DE FORMATAÇÃO E IMAGENS: Retorne também o campo "texto_anotado" com o texto completo da página. Ao ler a prova, se você identificar que existe uma figura, gráfico ou imagem no meio do texto_base ou do enunciado, insira EXATAMENTE o marcador [IMAGEM_0] no local exato onde a primeira figura deveria aparecer no texto. Se houver uma segunda imagem no mesmo texto, use [IMAGEM_1], e assim por diante. O índice N de [IMAGEM_N] corresponde à posição da imagem na lista fornecida (Imagem 1 → [IMAGEM_0], Imagem 2 → [IMAGEM_1], etc.).
 </instrucoes>
 
 <limitacoes>
@@ -73,6 +74,7 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 
 <saida>
 {
+  "texto_anotado": "QUESTÃO 12\nEste gráfico [IMAGEM_0] mostra a evolução do PIB...\nA) [IMAGEM_1]\nB) [IMAGEM_2]\nQUESTÃO 13\nA charge [IMAGEM_3] representa...",
   "mapeamento": [
     { "imagem": "img_8_1", "questao": 12, "idioma": null, "local": "enunciado" },
     { "imagem": "img_8_2", "questao": 12, "idioma": null, "local": "alternativa_a" },
@@ -150,9 +152,10 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
     /**
      * Processa todas as páginas de uma prova e retorna mapeamento global.
      * Não precisa mais do caminho do PDF — usa apenas os dados já extraídos.
+     * Também popula page.textoAnotado com o texto da página incluindo marcadores [IMAGEM_N].
      *
      * @param {Array} pagesData - Array de { pageNumber, text, images: [{id, dataUrl, mimeType}] }
-     * @returns {Promise<Map>}  - Map: nome_imagem → { questao, idioma }
+     * @returns {Promise<Map>}  - Map: nome_imagem → { questao, idioma, local }
      */
     async processarProvaCompleta(pagesData) {
         const mapeamentoGlobal = new Map();
@@ -165,6 +168,11 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 
             try {
                 const resultado = await this.analisarPagina(text || '', images, pageNumber);
+
+                // Salvar texto anotado com marcadores [IMAGEM_N] diretamente na página
+                if (resultado.texto_anotado) {
+                    page.textoAnotado = resultado.texto_anotado;
+                }
 
                 if (resultado.mapeamento) {
                     for (const item of resultado.mapeamento) {
