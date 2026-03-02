@@ -15,7 +15,7 @@ class GeminiAnalyzer {
             throw new Error('GEMINI_API_KEY não configurada');
         }
         this.ai = new GoogleGenAI({ apiKey });
-        this.model = 'gemini-2.5-flash';
+        this.model = 'gemini-2.5-pro';
     }
 
     /**
@@ -64,7 +64,14 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
 3. QUESTÕES 1-5 do ENEM podem ser de Inglês ou Espanhol: se for o caso, preencha "idioma".
 4. ALTERNATIVAS COM IMAGENS: Algumas questões possuem imagens nas alternativas (A, B, C, D, E) em vez de texto. Indique exatamente onde a imagem está localizada usando o campo "local". O campo "local" deve ser preenchido como "enunciado", "alternativa_a", "alternativa_b", "alternativa_c", "alternativa_d" ou "alternativa_e".
 5. LIXO VISUAL: logotipos, ícones, códigos de barra → "questao": null, "local": null.
-6. REGRAS RIGOROSAS DE FORMATAÇÃO E IMAGENS: Retorne também o campo "texto_anotado" com o texto completo da página. Ao ler a prova, se você identificar que existe uma figura, gráfico ou imagem no meio do texto_base ou do enunciado, insira EXATAMENTE o marcador [IMAGEM_0] no local exato onde a primeira figura deveria aparecer no texto. Se houver uma segunda imagem no mesmo texto, use [IMAGEM_1], e assim por diante. O índice N de [IMAGEM_N] corresponde à posição da imagem na lista fornecida (Imagem 1 → [IMAGEM_0], Imagem 2 → [IMAGEM_1], etc.).
+6. REGRAS RIGOROSAS DE FORMATAÇÃO E IMAGENS: Ao ler a prova, se identificar uma figura, gráfico ou imagem no meio do texto, insira EXATAMENTE o marcador [IMAGEM_N] no local exato da aparição. O índice N corresponde à posição na lista fornecida (Imagem 1 → [IMAGEM_0], etc.).
+    -LOCALIZAÇÃO CIRÚRGICA (ANCORAGEM): Você deve agir como um diagramador. Localize a última frase ANTES da imagem e a primeira frase DEPOIS da imagem. O marcador deve ficar exatamente entre elas.
+    -FORMATO SANDWICH: Interrompa o texto para injetar a imagem. Ex: Texto inicial... [IMAGEM_0] ...continuação do texto.
+    -HIERARQUIA DE ALTERNATIVAS: Se a imagem pertencer a uma alternativa, o marcador deve vir imediatamente após a letra. Ex: A) [IMAGEM_1]. Se a alternativa for apenas a imagem, o texto deve ser apenas o marcador.
+    -CONTEXTO VISUAL VS OCR: Use sua visão computacional para "cortar" o texto do ${pageText} e injetar o marcador no ponto de interrupção visual observado nas imagens anexadas.
+    -TRAVA DE UNICIDADE (ANTI-DUPLICAÇÃO): Gere o texto_anotado uma única vez por página. Não repita blocos de questões ou parágrafos. Se uma página for processada, todas as suas imagens e textos devem ser mesclados em um único fluxo contínuo e único.
+    -DICA DE REFERÊNCIA: O marcador deve vir ANTES de fontes (Ex: "Disponível em:...") se a imagem estiver acima delas.
+
 </instrucoes>
 
 <limitacoes>
