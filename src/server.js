@@ -543,17 +543,16 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             };
         });
         
-        const allImages = resultPages.flatMap(p => p.images || []);
         const fullText = resultPages.map(p => p.text).join('\n\n');
-        
+        const totalImages = resultPages.reduce((sum, p) => sum + (p.images?.length || 0), 0);
+
         const result = {
             metadata,
             pages: resultPages,
             fullText,
-            allImages,
             summary: {
                 totalPages: resultPages.length,
-                totalImages: allImages.length,
+                totalImages,
                 totalCharacters: fullText.length,
                 pagesWithImages: resultPages.filter(p => p.imageCount > 0).length
             }
@@ -570,18 +569,6 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 console.log(`🤖 Usando Gemini Vision para tagging de imagens...`);
                 const mapeamento = await geminiAnalyzer.processarProvaCompleta(result.pages);
                 geminiAnalyzer.aplicarMapeamento(result.pages, mapeamento);
-                
-                // Atualizar allImages também
-                if (result.allImages) {
-                    for (const img of result.allImages) {
-                        const mapping = mapeamento.get(img.id);
-                        if (mapping) {
-                            img.questao = mapping.questao;
-                            img.idioma = mapping.idioma;
-                            img.local = mapping.local;
-                        }
-                    }
-                }
                 console.log(`✅ Gemini: ${mapeamento.size} imagens mapeadas com sucesso`);
             } catch (geminiError) {
                 console.error(`❌ Erro Gemini, usando fallback:`, geminiError.message);
@@ -600,12 +587,6 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 delete img.yPos;
             }
         }
-        if (result.allImages) {
-            for (const img of result.allImages) {
-                delete img.yPos;
-            }
-        }
-        
         // 3. Processar gabarito
         let gabarito_data = {};
         let gabaritoSource = 'nenhum';
