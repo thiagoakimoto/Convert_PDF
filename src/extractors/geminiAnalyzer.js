@@ -169,9 +169,9 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
             try {
                 const resultado = await this.analisarPagina(text || '', images, pageNumber);
 
-                // Salvar texto anotado com marcadores [IMAGEM_N] diretamente na página
+                // Substituir text pelo texto anotado com marcadores [IMAGEM_N]
                 if (resultado.texto_anotado) {
-                    page.textoAnotado = resultado.texto_anotado;
+                    page.text = resultado.texto_anotado;
                 }
 
                 if (resultado.mapeamento) {
