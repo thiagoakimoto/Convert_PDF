@@ -15,7 +15,7 @@ class GeminiAnalyzer {
             throw new Error('GEMINI_API_KEY não configurada');
         }
         this.ai = new GoogleGenAI({ apiKey });
-        this.model = 'gemini-2.5-pro';
+        this.model = 'gemini-2.5-flash';
     }
 
     /**
