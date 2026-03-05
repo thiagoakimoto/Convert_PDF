@@ -166,36 +166,42 @@ Imagem 1 = primeiro inlineData, Imagem 2 = segundo inlineData, e assim por diant
      */
     async processarProvaCompleta(pagesData) {
         const mapeamentoGlobal = new Map();
-        const paginasComImagens = pagesData.filter(p => p.images && p.images.length > 0);
+        const paginasComImagens = pagesData.filter(p => p.images && p.images.length > 0 && p.images.length <= 20);
+        const paginasIgnoradas  = pagesData.filter(p => p.images && p.images.length > 20);
 
-        console.log(`\n🚀 Gemini: analisando ${paginasComImagens.length} página(s) com imagem(ns)...\n`);
+        if (paginasIgnoradas.length > 0) {
+            console.log(`⚠️ Gemini: ignorando ${paginasIgnoradas.length} página(s) com muitas imagens (lixo visual): ${paginasIgnoradas.map(p => `pág ${p.pageNumber} (${p.images.length} imgs)`).join(', ')}`);
+        }
 
-        for (const page of paginasComImagens) {
-            const { pageNumber, text, images } = page;
+        console.log(`\n🚀 Gemini: analisando ${paginasComImagens.length} página(s) em paralelo (lotes de 5)...\n`);
 
-            try {
-                const resultado = await this.analisarPagina(text || '', images, pageNumber);
+        const CONCORRENCIA = 5;
 
-                // Substituir text pelo texto anotado com marcadores [IMAGEM_N]
-                if (resultado.texto_anotado) {
-                    page.text = resultado.texto_anotado;
-                }
+        for (let i = 0; i < paginasComImagens.length; i += CONCORRENCIA) {
+            const lote = paginasComImagens.slice(i, i + CONCORRENCIA);
 
-                if (resultado.mapeamento) {
-                    for (const item of resultado.mapeamento) {
-                        mapeamentoGlobal.set(item.imagem, {
-                            questao: item.questao ?? null,
-                            idioma: item.idioma ?? null,
-                            local: item.local ?? null
-                        });
+            await Promise.all(lote.map(async (page) => {
+                const { pageNumber, text, images } = page;
+                try {
+                    const resultado = await this.analisarPagina(text || '', images, pageNumber);
+
+                    if (resultado.texto_anotado) {
+                        page.text = resultado.texto_anotado;
                     }
-                }
-            } catch (error) {
-                console.error(`Erro ao processar página ${pageNumber}:`, error.message);
-            }
 
-            // Rate limit: ~1 req/s (60 RPM — adequado para plano pago do Gemini)
-            await this.sleep(1000);
+                    if (resultado.mapeamento) {
+                        for (const item of resultado.mapeamento) {
+                            mapeamentoGlobal.set(item.imagem, {
+                                questao: item.questao ?? null,
+                                idioma: item.idioma ?? null,
+                                local: item.local ?? null
+                            });
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Erro ao processar página ${pageNumber}:`, error.message);
+                }
+            }));
         }
 
         console.log(`\n✅ Gemini concluído: ${mapeamentoGlobal.size} imagem(ns) mapeada(s)\n`);
