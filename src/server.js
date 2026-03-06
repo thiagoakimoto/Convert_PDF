@@ -408,70 +408,43 @@ app.post('/gabarito/manual', async (req, res) => {
 });
 
 // ========================================
-// ROTA PRINCIPAL: PROCESSAR PROVA COMPLETA
+// ROTA PRINCIPAL: PROCESSAR PROVA COMPLETA (ASYNC/POLLING)
 // ========================================
 
-// Processa prova (PDF) + gabarito (PDF/imagem ou JSON) e retorna formato estruturado
-app.post('/processar-prova-completa', upload.any(), async (req, res) => {
-    try {
-        // Buscar arquivo da prova com nomes alternativos
-        const provaFile = req.files?.find(f => 
-            ['prova', 'pdf', 'file', 'document'].includes(f.fieldname.toLowerCase())
-        );
-        
-        // Buscar arquivo do gabarito com nomes alternativos
-        const gabaritoFile = req.files?.find(f => 
-            ['gabarito', 'answer', 'respostas', 'answers'].includes(f.fieldname.toLowerCase())
-        );
-        
-        // Validar arquivo da prova
-        if (!provaFile) {
-            const camposRecebidos = req.files?.map(f => f.fieldname).join(', ') || 'nenhum';
-            
-            return res.status(400).json({
-                success: false,
-                error: 'Arquivo da prova (PDF) é obrigatório',
-                dica: 'Use o campo "prova" no form-data',
-                camposAlternativos: ['prova', 'pdf', 'file', 'document'],
-                camposRecebidos: camposRecebidos
-            });
-        }
+// Fila de jobs em memória
+const jobs = new Map(); // jobId -> { status, result, error, createdAt }
 
+// Limpeza automática de jobs antigos (>2h)
+setInterval(() => {
+    const limite = Date.now() - 2 * 60 * 60 * 1000;
+    for (const [id, job] of jobs) {
+        if (new Date(job.createdAt).getTime() < limite) jobs.delete(id);
+    }
+}, 30 * 60 * 1000);
+
+async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
+    try {
         console.log(`\n🎯 Processando prova completa`);
-        console.log(`📄 Campos recebidos: ${req.files?.map(f => `${f.fieldname}="${f.originalname}"`).join(', ') || 'nenhum'}`);
-        console.log(`📄 Prova: ${provaFile.originalname} (campo: ${provaFile.fieldname})`);
-        if (gabaritoFile) {
-            console.log(`📋 Gabarito: ${gabaritoFile.originalname} (campo: ${gabaritoFile.fieldname})`);
-        } else {
-            console.log(`⚠️ Gabarito NÃO encontrado! Campos aceitos: gabarito, answer, respostas, answers`);
-        }
-        
-        const gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null;
-        
-        // === EXTRAÇÃO OTIMIZADA PARA ECONOMIA DE MEMÓRIA ===
-        // Em vez de extractAll (que carrega tudo em paralelo),
-        // extraímos texto primeiro, filtramos páginas, e só depois extraímos imagens.
-        
+        console.log(`📄 Prova: ${provaFile.originalname}`);
+        if (gabaritoFile) console.log(`📋 Gabarito: ${gabaritoFile.originalname}`);
+
         // 1. Ler buffer da prova uma única vez
         console.log(`📄 Extraindo conteúdo da prova...`);
         const pdfBuffer = fs.readFileSync(provaFile.path);
         const fileSizeMB = (pdfBuffer.length / 1024 / 1024).toFixed(1);
         console.log(`📄 Arquivo: ${fileSizeMB}MB`);
-        
+
         const mem1 = process.memoryUsage();
         console.log(`💾 Memória inicial: RSS=${(mem1.rss/1024/1024).toFixed(0)}MB, Heap=${(mem1.heapUsed/1024/1024).toFixed(0)}MB`);
-        
+
         // 2. Extrair APENAS TEXTO primeiro (baixo uso de memória)
         const textData = await pdfExtractor.extractTextFromBuffer(pdfBuffer);
         console.log(`📄 Texto extraído: ${textData.totalPages} páginas`);
-        
-        // 3. Filtrar páginas ANTES de extrair imagens (economia enorme de memória)
-        // Remover página 1 (capa/instruções)
+
+        // 3. Filtrar páginas ANTES de extrair imagens (economia de memória)
         let filteredPages = textData.pages.filter(p => p.pageNumber > 1);
-        
-        // Detectar e remover folhas de respostas (numeração reinicia)
+
         const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
-        
         const pageData = filteredPages.map(page => {
             questionPattern.lastIndex = 0;
             const nums = [];
@@ -482,10 +455,10 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             }
             return { pageNumber: page.pageNumber, nums, text: page.text || '' };
         });
-        
+
         let cutoffPage = Infinity;
         let runningMax = 0;
-        
+
         for (const pd of pageData) {
             if (pd.nums.some(n => n > runningMax)) {
                 for (const n of pd.nums) runningMax = Math.max(runningMax, n);
@@ -494,20 +467,19 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             if (/quest[õo]es?\s+discursivas?/i.test(pd.text)) continue;
             const restartNums = pd.nums.filter(n => n <= runningMax * 0.8);
             const alphaContent = pd.text.replace(/[^a-záéíóúàâêôãõçA-ZÁÉÍÓÚÀÂÊÔÃÕÇ]/g, '');
-            
+
             if (restartNums.length >= 10 && alphaContent.length < 500 && runningMax > 20) {
                 cutoffPage = pd.pageNumber;
                 console.log(`📋 Folha de respostas detectada: pág ${cutoffPage} (${restartNums.length} números reiniciados, ${alphaContent.length} chars texto)`);
                 break;
             }
         }
-        
+
         if (cutoffPage !== Infinity) {
             console.log(`📋 Removendo folha de respostas a partir da página ${cutoffPage}`);
             filteredPages = filteredPages.filter(p => p.pageNumber < cutoffPage);
         }
-        
-        // Remover páginas de questões discursivas (da primeira ocorrência em diante)
+
         const discursiveIdx = filteredPages.findIndex(p => /quest[õo]es?\s+discursivas?/i.test(p.text || ''));
         if (discursiveIdx !== -1) {
             const removidas = filteredPages.length - discursiveIdx;
@@ -515,23 +487,23 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
             filteredPages = filteredPages.slice(0, discursiveIdx);
             console.log(`📝 Removidas ${removidas} página(s) de questões discursivas (a partir da pág ${paginaInicio})`);
         }
-        
-        // 4. Extrair imagens APENAS das páginas que restaram (economia de memória)
+
+        // 4. Extrair imagens apenas das páginas filtradas
         const keptPageNumbers = filteredPages.map(p => p.pageNumber);
         console.log(`📄 Extraindo imagens de ${keptPageNumbers.length} páginas (de ${textData.totalPages} total)...`);
-        
+
         const mem2 = process.memoryUsage();
         console.log(`💾 Antes das imagens: RSS=${(mem2.rss/1024/1024).toFixed(0)}MB, Heap=${(mem2.heapUsed/1024/1024).toFixed(0)}MB`);
-        
+
         const images = await pdfExtractor.extractImagesFromBuffer(pdfBuffer, {
             maxWidth: 800,
             pages: keptPageNumbers
         });
-        
-        // 5. Extrair metadata (leve)
+
+        // 5. Extrair metadata
         const metadata = await pdfExtractor.extractMetadata(pdfBuffer);
-        
-        // 6. Montar resultado no formato esperado
+
+        // 6. Montar resultado
         const resultPages = filteredPages.map(page => {
             const pageImages = images.filter(img => img.page === page.pageNumber);
             return {
@@ -543,7 +515,7 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 questionPositions: page.questionPositions || []
             };
         });
-        
+
         const fullText = resultPages.map(p => p.text).join('\n\n');
         const totalImages = resultPages.reduce((sum, p) => sum + (p.images?.length || 0), 0);
 
@@ -558,14 +530,13 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 pagesWithImages: resultPages.filter(p => p.imageCount > 0).length
             }
         };
-        
+
         const mem3 = process.memoryUsage();
         console.log(`💾 Memória final: RSS=${(mem3.rss/1024/1024).toFixed(0)}MB, Heap=${(mem3.heapUsed/1024/1024).toFixed(0)}MB`);
         console.log(`✅ Extração: ${result.summary.totalPages} páginas (skip pág 1), ${result.summary.totalImages} imagens`);
-        
-        // 2. Adicionar campo "questao" em cada imagem
-        // Usar Gemini Vision se disponível (100% assertivo)
-        if (geminiAnalyzer && provaFile) {
+
+        // 7. Taguear imagens com Gemini ou fallback
+        if (geminiAnalyzer) {
             try {
                 console.log(`🤖 Usando Gemini Vision para tagging de imagens...`);
                 const mapeamento = await geminiAnalyzer.processarProvaCompleta(result.pages);
@@ -576,61 +547,50 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                 tagImagensComQuestao(result.pages);
             }
         } else {
-            // Fallback: usar método local (menos preciso)
             tagImagensComQuestao(result.pages);
         }
         console.log(`🏷️ Imagens tagueadas com número da questão`);
-        
-        // Limpar campos internos de posição (não precisam ir na resposta)
+
+        // Limpar campos internos
         for (const page of result.pages) {
             delete page.questionPositions;
             for (const img of page.images || []) {
                 delete img.yPos;
             }
         }
-        // 3. Processar gabarito
+
+        // 8. Processar gabarito
         let gabarito_data = {};
-        let gabaritoSource = 'nenhum';
         let textoGabarito = '';
-        
+
         if (gabaritoFile) {
             console.log(`📋 Extraindo gabarito de: ${gabaritoFile.originalname}`);
             const gabaritoText = await pdfExtractor.extractText(gabaritoFile.path);
-            
-            // Usar TODAS as páginas do gabarito
             textoGabarito = gabaritoText.pages.map(p => p.text).join('\n');
             console.log(`📋 Texto do gabarito: ${textoGabarito.length} chars (${gabaritoText.pages.length} páginas)`);
-            
-            // Tentar isolar o primeiro bloco (TIPO 1, ou primeira cor/caderno)
-            // Funciona com FGV (TIPO 1/2/3), ENEM (cores), CESPE, etc.
+
             const blocoMatch = textoGabarito.match(
                 /(?:TIPO\s*1|Caderno\s*\d+)[^\n]*\n([\s\S]*?)(?=TIPO\s*2|Caderno\s*\d+|$)/i
             );
-            
-            // Validar se o bloco isolado realmente contém pares questão-resposta
-            // Se não contém (ex: ENEM onde CADERNO 1/7 ficam entre seções), usar texto completo
+
             let blocoGabarito;
             if (blocoMatch) {
                 const temPares = /\b\d{1,3}\s+[A-E]\b/i.test(blocoMatch[1]);
                 blocoGabarito = temPares ? blocoMatch[1] : textoGabarito;
-                if (!temPares) {
-                    console.log(`📋 Bloco isolado não contém pares Q-R, usando texto completo`);
-                }
+                if (!temPares) console.log(`📋 Bloco isolado não contém pares Q-R, usando texto completo`);
             } else {
                 blocoGabarito = textoGabarito;
             }
-            
-            // Parse com 4 estratégias
+
             const linhas = blocoGabarito.split('\n').map(l => l.trim()).filter(l => l.length > 0);
             console.log(`📋 Bloco gabarito: ${linhas.length} linhas`);
             console.log(`📋 Primeiras 10 linhas: ${linhas.slice(0, 10).map((l, i) => `[${i}]="${l}"`).join(' | ')}`);
-            
-            // Estratégia 1: linhas de números seguidas por linhas de letras (formato tabela limpo)
+
+            // Estratégia 1: linhas de números seguidas por linhas de letras
             for (let i = 0; i < linhas.length - 1; i++) {
                 if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
                 const numeros = linhas[i].match(/\d+/g);
                 const letras = linhas[i + 1].match(/[A-E*]/gi);
-                
                 if (numeros && letras && numeros.length >= 3 && numeros.length === letras.length) {
                     for (let j = 0; j < numeros.length; j++) {
                         const resp = letras[j].toUpperCase();
@@ -639,9 +599,8 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                     i++;
                 }
             }
-            
-            // Estratégia 2: pares número-letra intercalados ("1 A 2 C 3 C" ou "1\nA\n2\nC")
-            // Suporta "Anulado" e linhas bilíngues tipo "1 D B" (pega primeira letra)
+
+            // Estratégia 2: pares número-letra intercalados
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 1 falhou, tentando pares número-letra...`);
                 const allTokens = blocoGabarito.replace(/\n/g, ' ').match(/\S+/g) || [];
@@ -659,8 +618,8 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                     }
                 }
             }
-            
-            // Estratégia 3: blocos separados (todas as linhas de números + todas as linhas de letras)
+
+            // Estratégia 3: blocos separados
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 2 falhou, tentando blocos separados...`);
                 const linhasNums = [];
@@ -676,8 +635,8 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                     }
                 }
             }
-            
-            // Estratégia 4: regex flexível - "número espaço(s) letra/Anulado" em qualquer contexto
+
+            // Estratégia 4: regex flexível
             if (Object.keys(gabarito_data).length === 0) {
                 console.log(`📋 Estratégia 3 falhou, tentando regex flexível...`);
                 const pares = blocoGabarito.matchAll(/\b(\d{1,3})\s+([A-E*]|Anulad[oa])\b/gi);
@@ -689,74 +648,110 @@ app.post('/processar-prova-completa', upload.any(), async (req, res) => {
                     }
                 }
             }
-            
-            gabaritoSource = gabaritoFile.originalname;
+
             console.log(`✅ Gabarito parseado: ${Object.keys(gabarito_data).length} respostas`);
             if (Object.keys(gabarito_data).length > 0) {
                 const amostra = Object.entries(gabarito_data).slice(0, 5).map(([k, v]) => `${k}=${v}`).join(', ');
                 console.log(`📋 Amostra: ${amostra}...`);
             }
-            
-            if (fs.existsSync(gabaritoFile.path)) fs.unlinkSync(gabaritoFile.path);
         } else if (gabaritoManual) {
             console.log(`📋 Processando gabarito manual`);
             const gabaritoResult = gabaritoExtractor.processManual(gabaritoManual);
             gabarito_data = gabaritoResult.respostas || {};
-            gabaritoSource = 'manual';
         }
-        
-        // Limpar arquivo da prova
-        if (fs.existsSync(provaFile.path)) fs.unlinkSync(provaFile.path);
-        
-        console.log(`✅ Processamento completo!`);
-        console.log(`   Páginas: ${result.summary.totalPages}`);
-        console.log(`   Imagens: ${result.summary.totalImages}`);
-        console.log(`   Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
-        
-        // 4. Resposta - data do extractAll (imagens com campo questao) + gabarito
-        // Formatar gabarito como string "1: A, 2: D, 3: B, ..."
+
+        console.log(`✅ Processamento completo! Páginas: ${result.summary.totalPages}, Imagens: ${result.summary.totalImages}, Gabarito: ${Object.keys(gabarito_data).length} respostas\n`);
+
+        // 9. Formatar resposta
         const gabaritoString = Object.keys(gabarito_data).length > 0
             ? Object.entries(gabarito_data)
                 .sort(([a], [b]) => parseInt(a) - parseInt(b))
                 .map(([num, resp]) => `${num}: ${resp}`)
                 .join(', ')
             : '';
-        
+
         const response = {
             success: true,
             filename: provaFile.originalname,
             data: result,
             gabarito_data: gabaritoString
         };
-        
-        // DEBUG: incluir texto bruto do gabarito se veio vazio
-        if (!gabaritoString) {
-            response._debug_campos_recebidos = req.files?.map(f => f.fieldname) || [];
-            response._debug_gabarito_encontrado = !!gabaritoFile;
-            if (gabaritoFile) {
-                response._debug_gabarito_texto = textoGabarito || 'texto não disponível';
-            }
-        }
-        
-        res.json(response);
 
-    } catch (error) {
-        console.error('❌ Erro ao processar prova completa:', error);
-        
-        // Limpar arquivos em caso de erro
-        if (req.files) {
-            for (const file of req.files) {
-                if (fs.existsSync(file.path)) {
-                    try { fs.unlinkSync(file.path); } catch(e) {}
-                }
-            }
+        if (!gabaritoString && gabaritoFile) {
+            response._debug_gabarito_texto = textoGabarito || 'texto não disponível';
         }
-        
-        res.status(500).json({
+
+        return response;
+
+    } finally {
+        // Limpeza garantida mesmo em caso de erro
+        if (provaFile && fs.existsSync(provaFile.path)) { try { fs.unlinkSync(provaFile.path); } catch(e) {} }
+        if (gabaritoFile && fs.existsSync(gabaritoFile.path)) { try { fs.unlinkSync(gabaritoFile.path); } catch(e) {} }
+    }
+}
+
+// POST /processar-prova-completa → retorna jobId imediatamente e processa em background
+app.post('/processar-prova-completa', upload.any(), (req, res) => {
+    const provaFile = req.files?.find(f =>
+        ['prova', 'pdf', 'file', 'document'].includes(f.fieldname.toLowerCase())
+    );
+    const gabaritoFile = req.files?.find(f =>
+        ['gabarito', 'answer', 'respostas', 'answers'].includes(f.fieldname.toLowerCase())
+    );
+
+    if (!provaFile) {
+        const camposRecebidos = req.files?.map(f => f.fieldname).join(', ') || 'nenhum';
+        return res.status(400).json({
             success: false,
-            error: error.message || 'Erro ao processar prova completa'
+            error: 'Arquivo da prova (PDF) é obrigatório',
+            dica: 'Use o campo "prova" no form-data',
+            camposAlternativos: ['prova', 'pdf', 'file', 'document'],
+            camposRecebidos
         });
     }
+
+    let gabaritoManual = null;
+    try { gabaritoManual = req.body.gabarito ? JSON.parse(req.body.gabarito) : null; } catch(e) {}
+
+    const jobId = uuidv4();
+    jobs.set(jobId, { status: 'processing', createdAt: new Date() });
+
+    console.log(`\n🎯 Job ${jobId} criado — processando em background...`);
+
+    // Responde imediatamente com o jobId (evita timeout do Cloudflare)
+    res.json({ success: true, jobId, status: 'processing' });
+
+    // Processa em background
+    executarProcessamento(provaFile, gabaritoFile, gabaritoManual)
+        .then(result => {
+            jobs.set(jobId, { status: 'done', result, createdAt: jobs.get(jobId)?.createdAt });
+            console.log(`✅ Job ${jobId} concluído`);
+        })
+        .catch(error => {
+            console.error(`❌ Job ${jobId} falhou:`, error.message);
+            jobs.set(jobId, { status: 'error', error: error.message, createdAt: jobs.get(jobId)?.createdAt });
+        });
+});
+
+// GET /job/:jobId → verifica status e retorna resultado quando pronto
+app.get('/job/:jobId', (req, res) => {
+    const { jobId } = req.params;
+    const job = jobs.get(jobId);
+
+    if (!job) {
+        return res.status(404).json({ success: false, error: 'Job não encontrado ou já expirou' });
+    }
+    if (job.status === 'processing') {
+        return res.json({ success: true, jobId, status: 'processing' });
+    }
+    if (job.status === 'error') {
+        jobs.delete(jobId);
+        return res.status(500).json({ success: false, jobId, status: 'error', error: job.error });
+    }
+    // done — retorna resultado e limpa da memória
+    const { result } = job;
+    jobs.delete(jobId);
+    return res.json({ ...result, jobId, status: 'done' });
 });
 
 // Middleware de tratamento de erros
@@ -799,10 +794,10 @@ app.listen(PORT, () => {
    POST /gabarito/manual            - Processar gabarito manual (JSON)
    
    🎯 COMPLETO (RECOMENDADO):
-   POST /processar-prova-completa   - PDF + Gabarito → Match automático!
+   POST /processar-prova-completa   - Inicia job async → retorna jobId
+   GET  /job/:jobId                 - Verifica status e retorna resultado
 
-📝 Para n8n: Use /processar-prova-completa com multipart/form-data
-   Campos: prova (PDF) + gabarito (imagem ou JSON)
+📝 Para n8n: POST /processar-prova-completa → pega jobId → GET /job/:jobId até status=done
     `);
 });
 
