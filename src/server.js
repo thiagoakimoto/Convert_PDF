@@ -442,7 +442,22 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
         console.log(`📄 Texto extraído: ${textData.totalPages} páginas`);
 
         // 3. Filtrar páginas ANTES de extrair imagens (economia de memória)
-        let filteredPages = textData.pages.filter(p => p.pageNumber > 1);
+        // Incluir página 1 apenas se ela contiver questões (ex: não é capa do ENEM)
+        const page1 = textData.pages.find(p => p.pageNumber === 1);
+        const page1TemQuestoes = page1 && (() => {
+            const pat = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+            let m;
+            while ((m = pat.exec(page1.text || '')) !== null) {
+                const n = parseInt(m[1]);
+                if (n > 0 && n <= 200) return true;
+            }
+            return false;
+        })();
+        console.log(`📄 Página 1: ${page1TemQuestoes ? 'inclusa (tem questões)' : 'ignorada (capa/instruções)'}`);
+
+        let filteredPages = textData.pages.filter(p =>
+            page1TemQuestoes ? true : p.pageNumber > 1
+        );
 
         const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
         const pageData = filteredPages.map(page => {
