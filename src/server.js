@@ -712,7 +712,7 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
             gabarito_data: gabaritoString
         };
 
-        if (gabaritoFile) {
+        if (!gabaritoString && gabaritoFile) {
             response._debug_gabarito_texto = textoGabarito || 'texto não disponível';
         }
 
