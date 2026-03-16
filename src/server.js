@@ -445,7 +445,10 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
         // Incluir página 1 apenas se ela contiver questões (ex: não é capa do ENEM)
         const page1 = textData.pages.find(p => p.pageNumber === 1);
         const page1TemQuestoes = page1 && (() => {
-            const pat = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+            // Detecta questões em dois formatos:
+            // ENEM: número sozinho na linha ("13\n")
+            // CEBRASPE: número inline com texto ("13 No último período...")
+            const pat = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})(?:\s*\n|\s+[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ])/gi;
             let m;
             while ((m = pat.exec(page1.text || '')) !== null) {
                 const n = parseInt(m[1]);
@@ -459,7 +462,7 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
             page1TemQuestoes ? true : p.pageNumber > 1
         );
 
-        const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})\s*\n/gi;
+        const questionPattern = /(?:^|\n)\s*(?:Quest[aã]o\s+)?(\d{1,3})(?:\s*\n|\s+[A-ZÁÉÍÓÚÀÂÊÔÃÕÇ])/gi;
         const pageData = filteredPages.map(page => {
             questionPattern.lastIndex = 0;
             const nums = [];
@@ -601,6 +604,23 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
             console.log(`📋 Bloco gabarito: ${linhas.length} linhas`);
             console.log(`📋 Primeiras 10 linhas: ${linhas.slice(0, 10).map((l, i) => `[${i}]="${l}"`).join(' | ')}`);
 
+            // Estratégia 0: formato "Item N N N / Gabarito L L L" (CEBRASPE)
+            for (let i = 0; i < linhas.length - 1; i++) {
+                if (!/^item\b/i.test(linhas[i])) continue;
+                if (!/^gabarito\b/i.test(linhas[i + 1])) continue;
+                const numeros = linhas[i].match(/\d+/g);
+                const letras = linhas[i + 1].match(/[A-EXa-ex*]/g);
+                if (numeros && letras && numeros.length === letras.length) {
+                    for (let j = 0; j < numeros.length; j++) {
+                        const num = parseInt(numeros[j]);
+                        if (num > 0 && num <= 200) {
+                            const resp = letras[j].toUpperCase();
+                            gabarito_data[String(num)] = (resp === 'X' || resp === '*') ? 'ANULADA' : resp;
+                        }
+                    }
+                }
+            }
+
             // Estratégia 1: linhas de números seguidas por linhas de letras
             for (let i = 0; i < linhas.length - 1; i++) {
                 if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
@@ -692,7 +712,7 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
             gabarito_data: gabaritoString
         };
 
-        if (!gabaritoString && gabaritoFile) {
+        if (gabaritoFile) {
             response._debug_gabarito_texto = textoGabarito || 'texto não disponível';
         }
 
