@@ -625,11 +625,11 @@ async function executarProcessamento(provaFile, gabaritoFile, gabaritoManual) {
             for (let i = 0; i < linhas.length - 1; i++) {
                 if (!/^\d[\d\s]+\d$/.test(linhas[i])) continue;
                 const numeros = linhas[i].match(/\d+/g);
-                const letras = linhas[i + 1].match(/[A-E*]/gi);
+                const letras = linhas[i + 1].match(/[A-EXa-ex*]/g);
                 if (numeros && letras && numeros.length >= 3 && numeros.length === letras.length) {
                     for (let j = 0; j < numeros.length; j++) {
                         const resp = letras[j].toUpperCase();
-                        gabarito_data[numeros[j]] = resp === '*' ? 'ANULADA' : resp;
+                        gabarito_data[numeros[j]] = (resp === 'X' || resp === '*') ? 'ANULADA' : resp;
                     }
                     i++;
                 }
